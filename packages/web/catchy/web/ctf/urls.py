@@ -67,4 +67,9 @@ urlpatterns = [
         views.thread_stream,
         name="thread_stream",
     ),
+    path(
+        "threads/<uuid:thread_uuid>/filetree/",
+        views.thread_filetree,
+        name="thread_filetree",
+    ),
 ]

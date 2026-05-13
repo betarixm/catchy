@@ -3,14 +3,16 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any, TypedDict
 from uuid import UUID
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
+from django.contrib.auth.views import redirect_to_login
 from django.core.exceptions import PermissionDenied
 from django.db.models import Q, QuerySet
-from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
@@ -741,6 +743,62 @@ def thread_stream(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     return response
 
 
+def thread_filetree(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
+    thread = get_object_or_404(Thread.objects.select_related("ctf"), uuid=thread_uuid)
+    if not thread.can_view(request.user):
+        if not request.user.is_authenticated:
+            return redirect_to_login(request.get_full_path())
+        raise PermissionDenied
+
+    # The thread root also contains runtime internals; the viewer should expose
+    # only the editable workspace subtree that the agent actually works in.
+    root_path = thread.workspace_path
+    if not root_path and thread.thread_root:
+        root_path = str(Path(thread.thread_root) / "workspace")
+    if not root_path:
+        return JsonResponse({"error": "no workspace for thread"}, status=404)
+
+    root = Path(root_path)
+    if not root.exists():
+        return JsonResponse({"error": "workspace not found"}, status=404)
+
+    def build_node(
+        p: Path,
+        base: Path,
+        depth: int = 6,
+        entries_limit: int = 2000,
+        counter: dict[str, int] | None = None,
+    ):
+        if counter is None:
+            counter = {"n": 0}
+        name = p.name
+        rel = str(p.relative_to(base))
+        node: dict[str, Any] = {
+            "name": name,
+            "path": rel,
+            "type": "dir" if p.is_dir() else "file",
+        }
+        if p.is_dir() and depth > 0 and counter["n"] < entries_limit:
+            children = []
+            try:
+                for child in sorted(
+                    p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())
+                ):
+                    counter["n"] += 1
+                    if counter["n"] > entries_limit:
+                        break
+                    children.append(
+                        build_node(child, base, depth - 1, entries_limit, counter)
+                    )
+            except PermissionError:
+                pass
+            node["children"] = children
+        return node
+
+    tree = build_node(root, root)
+    return JsonResponse(tree)
+
+
 def _event_stream(thread_id: int, last_sequence: int = 0) -> Iterator[str]:
     while True:
         thread = Thread.objects.select_related(
@@ -796,8 +854,8 @@ def _attach_credential_visibility(
     marked_threads = list(threads)
     for thread in marked_threads:
         credential = thread.credential
-        thread.can_show_credential = (
-            credential is not None and credential.can_view(user)
+        thread.can_show_credential = credential is not None and credential.can_view(
+            user
         )
     return marked_threads
 

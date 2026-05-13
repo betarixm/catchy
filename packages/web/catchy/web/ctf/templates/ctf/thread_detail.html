@@ -3,23 +3,26 @@
 {% block title %}Thread {{ thread.uuid }} — Catchy{% endblock %}
 
 {% block content %}
-  <div class="crumbs reveal">
-    <a href="{% url 'ctf:index' %}">Index</a>
-    <span class="sep">/</span>
-    {% if can_manage_thread %}
-      <a href="{{ thread.ctf.get_absolute_url }}">{{ thread.ctf.title }}</a>
-    {% else %}
-      <span>{{ thread.ctf.title }}</span>
-    {% endif %}
-    <span class="sep">/</span>
-    {% if can_manage_thread %}
-      <a href="{{ thread.challenge.get_absolute_url }}">{{ thread.challenge.challenge_id }}</a>
-    {% else %}
-      <span>{{ thread.challenge.challenge_id }}</span>
-    {% endif %}
-    <span class="sep">/</span>
-    <span class="now">{{ thread.uuid }}</span>
-  </div>
+  <div style="display: flex; gap: 20px; width: 100%;">
+    <!-- Left 70% -->
+    <div style="flex: 0 0 70%; min-width: 0;">
+      <div class="crumbs reveal">
+        <a href="{% url 'ctf:index' %}">Index</a>
+        <span class="sep">/</span>
+        {% if can_manage_thread %}
+          <a href="{{ thread.ctf.get_absolute_url }}">{{ thread.ctf.title }}</a>
+        {% else %}
+          <span>{{ thread.ctf.title }}</span>
+        {% endif %}
+        <span class="sep">/</span>
+        {% if can_manage_thread %}
+          <a href="{{ thread.challenge.get_absolute_url }}">{{ thread.challenge.challenge_id }}</a>
+        {% else %}
+          <span>{{ thread.challenge.challenge_id }}</span>
+        {% endif %}
+        <span class="sep">/</span>
+        <span class="now">#{{ thread.pk }}</span>
+      </div>
 
   <div class="page-head">
     <div class="title">
@@ -64,15 +67,15 @@
     </div>
   </div>
 
-  {% if thread.error %}
-    <div class="panel reveal" style="border-color: var(--err); margin-bottom: 32px;">
-      <div class="panel-head" style="background: var(--err); color: #fff; border-color: var(--err);">
-        <span style="color: #fff; font-weight: 500;">Error</span>
-        <span style="color: rgba(255,255,255,0.8); font-size: 13px;">stream halted</span>
-      </div>
-      <pre>{{ thread.error }}</pre>
-    </div>
-  {% endif %}
+      {% if thread.error %}
+        <div class="panel reveal" style="border-color: var(--err); margin-bottom: 32px;">
+          <div class="panel-head" style="background: var(--err); color: #fff; border-color: var(--err);">
+            <span style="color: #fff; font-weight: 500;">Error</span>
+            <span style="color: rgba(255,255,255,0.8); font-size: 13px;">stream halted</span>
+          </div>
+          <pre>{{ thread.error }}</pre>
+        </div>
+      {% endif %}
 
   {% if can_manage_thread %}
     <div class="thread-floating">
@@ -119,13 +122,33 @@
     {% endif %}
   {% endif %}
 
-  <section class="reveal">
-    <div class="section-head" style="margin-bottom: 20px;">
-      <h2>Timeline</h2>
-      <span class="meta"><span id="event-count">0</span> event{{ thread.events.count|pluralize }}</span>
+      <section class="reveal">
+        <div class="section-head" style="margin-bottom: 20px;">
+          <h2>Timeline</h2>
+          <span class="meta"><span id="event-count">0</span> event{{ thread.events.count|pluralize }}</span>
+        </div>
+        <div class="timeline" id="timeline"></div>
+      </section>
     </div>
-    <div class="timeline" id="timeline"></div>
-  </section>
+
+    <!-- Right 30% -->
+    <aside id="file-tree-pane" data-collapsed="false" data-refreshing="false" style="flex: 0 0 30%; display: flex; flex-direction: column; max-height: calc(100vh - 160px); position: sticky; top: 120px; align-self: flex-start; transition: width 0.2s ease, flex-basis 0.2s ease;">
+      <div class="file-tree-head" style="padding: 16px; border: 1px solid var(--rule-soft); background: var(--paper); display: flex; align-items: flex-start; gap: 10px;">
+        <div style="flex: 1; min-width: 0;">
+          <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
+            <h3 style="margin: 0; font-size: 18px; font-weight: 500; font-family: var(--serif);">Files</h3>
+            <button type="button" id="file-tree-toggle" aria-label="Collapse file tree" aria-expanded="true" style="margin-left: auto; border: 0; background: transparent; color: var(--ink); cursor: pointer; font-family: var(--mono); font-size: 18px; line-height: 1; padding: 0 2px;">▾</button>
+          </div>
+          <div id="file-stats" style="font-size: 12px; color: var(--muted); font-family: var(--sans);">
+            <div style="margin-top: 4px;">Loading…</div>
+          </div>
+        </div>
+      </div>
+      <div id="file-tree" style="flex: 1; overflow: auto; padding: 12px 16px; border: 1px solid var(--rule-soft); background: var(--paper-deep);">
+        Loading file tree…
+      </div>
+    </aside>
+  </div>
 
   {{ events_json|json_script:"events-data" }}
 
@@ -135,7 +158,278 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.5/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/ansi_up@5.2.1/ansi_up.min.js"></script>
+  <style>
+    @import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css");
+
+    #file-tree-pane {
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    #file-tree-pane[data-collapsed="true"] {
+      max-height: none;
+      flex-basis: auto;
+    }
+    #file-tree-pane[data-collapsed="false"] > .file-tree-head {
+      border-bottom: none;
+    }
+    #file-tree-pane[data-collapsed="true"] #file-tree {
+      display: none;
+    }
+    #file-tree-pane[data-collapsed="true"] > .file-tree-head {
+      border-bottom: 1px solid var(--rule-soft);
+    }
+    #file-tree-pane[data-refreshing="true"] > .file-tree-head,
+    #file-tree-pane[data-refreshing="true"] #file-tree {
+      border-color: #7CFF5B;
+      box-shadow:
+        0 0 0 1px rgba(124, 255, 91, 0.55),
+        0 0 14px rgba(124, 255, 91, 0.45),
+        0 0 28px rgba(124, 255, 91, 0.18);
+      animation: filetree-neon-blink 0.9s ease-in-out 0s 2;
+    }
+    @keyframes filetree-neon-blink {
+      0%, 100% {
+        box-shadow:
+          0 0 0 1px rgba(124, 255, 91, 0.35),
+          0 0 8px rgba(124, 255, 91, 0.24),
+          0 0 18px rgba(124, 255, 91, 0.10);
+      }
+      50% {
+        box-shadow:
+          0 0 0 1px rgba(124, 255, 91, 0.9),
+          0 0 18px rgba(124, 255, 91, 0.7),
+          0 0 40px rgba(124, 255, 91, 0.35);
+      }
+    }
+    #file-tree ul {
+      list-style: none;
+      padding-left: 0;
+      margin: 0;
+    }
+    #file-tree li {
+      margin: 0;
+      line-height: 1.6;
+    }
+    #file-tree .tree-item {
+      display: flex;
+      align-items: center;
+      user-select: none;
+      cursor: pointer;
+    }
+    #file-tree .tree-item-file {
+      cursor: default;
+    }
+    #file-tree .tree-item-icon {
+      width: 16px;
+      display: inline-block;
+      text-align: center;
+      margin-right: 4px;
+      flex-shrink: 0;
+    }
+    #file-tree .tree-item-name {
+      word-break: break-word;
+      font-family: var(--sans);
+      font-size: 13px;
+    }
+    #file-tree .tree-children {
+      display: none;
+      padding-left: 12px;
+    }
+    #file-tree .tree-children.open {
+      display: block;
+    }
+    #file-tree .tree-prefix {
+      display: inline-block;
+      width: 12px;
+      color: var(--muted);
+      font-size: 11px;
+      margin-right: 2px;
+      flex-shrink: 0;
+      font-family: var(--mono);
+    }
+    #file-stats {
+      font-family: var(--sans);
+    }
+  </style>
+
   <script>
+    function isWorkspaceUpdatedEvent(event) {
+      if (!event || typeof event !== 'object') return false;
+      if (event.source !== 'system') return false;
+      if (event.kind === 'workspace.changed') return true;
+    }
+
+    // File tree state and functions
+    let treeState = {
+      pane: null,
+      paneShell: null,
+      statsPane: null,
+      fileTreeUrl: null,
+      treeRequestId: 0,
+      expandedPaths: new Set([''])
+    };
+    let refreshFlashTimer = null;
+
+    function countNodes(node, stats = { files: 0, dirs: 0, bytes: 0 }) {
+      if (!node || typeof node !== 'object') return stats;
+      if (node.type === 'file') {
+        stats.files += 1;
+        if (typeof node.size === 'number' && Number.isFinite(node.size)) {
+          stats.bytes += node.size;
+        }
+        return stats;
+      }
+      if (node.type === 'dir') {
+        stats.dirs += 1;
+        if (Array.isArray(node.children)) {
+          for (const child of node.children) countNodes(child, stats);
+        }
+      }
+      return stats;
+    }
+
+    function formatBytes(bytes) {
+      if (!bytes) return '0 B';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let value = bytes;
+      let unitIndex = 0;
+      while (value >= 1024 && unitIndex < units.length - 1) {
+        value /= 1024;
+        unitIndex += 1;
+      }
+      return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+    }
+
+    function flashFileTreePane() {
+      if (!treeState.paneShell) return;
+      treeState.paneShell.setAttribute('data-refreshing', 'true');
+      if (refreshFlashTimer !== null) {
+        window.clearTimeout(refreshFlashTimer);
+      }
+      refreshFlashTimer = window.setTimeout(() => {
+        treeState.paneShell.setAttribute('data-refreshing', 'false');
+        refreshFlashTimer = null;
+      }, 1200);
+    }
+
+    function renderNode(node, isLast = true, expandedState = treeState.expandedPaths) {
+      const li = document.createElement('li');
+      const itemDiv = document.createElement('div');
+      itemDiv.className = node.type === 'dir' ? 'tree-item' : 'tree-item tree-item-file';
+
+      // Prefix (hierarchy lines)
+      const prefixSpan = document.createElement('span');
+      prefixSpan.className = 'tree-prefix';
+      prefixSpan.textContent = isLast ? '└' : '├';
+      itemDiv.appendChild(prefixSpan);
+
+      // Icon
+      const iconSpan = document.createElement('span');
+      iconSpan.className = 'tree-item-icon';
+      iconSpan.textContent = node.type === 'dir' ? '📁' : '📄';
+      itemDiv.appendChild(iconSpan);
+
+      // Name
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'tree-item-name';
+      nameSpan.textContent = node.name || '';
+      itemDiv.appendChild(nameSpan);
+
+      li.appendChild(itemDiv);
+
+      // Children
+      if (node.type === 'dir' && Array.isArray(node.children) && node.children.length > 0) {
+        const childrenDiv = document.createElement('div');
+        childrenDiv.className = 'tree-children';
+        const ul = document.createElement('ul');
+        const isExpanded = expandedState.has(node.path || '');
+        if (isExpanded || node.path === '') {
+          childrenDiv.classList.add('open');
+          iconSpan.textContent = '📂';
+        }
+
+        for (let i = 0; i < node.children.length; i++) {
+          const child = node.children[i];
+          const isLastChild = i === node.children.length - 1;
+          ul.appendChild(renderNode(child, isLastChild, expandedState));
+        }
+
+        childrenDiv.appendChild(ul);
+        li.appendChild(childrenDiv);
+
+        itemDiv.style.cursor = 'pointer';
+        itemDiv.addEventListener('click', (e) => {
+          e.stopPropagation();
+          childrenDiv.classList.toggle('open');
+          // Toggle icon
+          const nodePath = node.path || '';
+          if (childrenDiv.classList.contains('open')) {
+            expandedState.add(nodePath);
+            iconSpan.textContent = '📂';
+          } else {
+            expandedState.delete(nodePath);
+            iconSpan.textContent = '📁';
+          }
+        });
+      }
+
+      return li;
+    }
+
+    function refreshFileTree({ flash = false } = {}) {
+      const requestId = ++treeState.treeRequestId;
+      if (flash) {
+        flashFileTreePane();
+      }
+      fetch(treeState.fileTreeUrl, { cache: 'no-store' })
+        .then((r) => r.ok ? r.json() : Promise.reject(r))
+        .then((tree) => {
+          if (requestId !== treeState.treeRequestId) return;
+          const stats = countNodes(tree);
+          treeState.pane.innerHTML = '';
+          const rootUl = document.createElement('ul');
+          rootUl.appendChild(renderNode(tree, true, treeState.expandedPaths));
+          treeState.pane.appendChild(rootUl);
+          if (treeState.statsPane) {
+            treeState.statsPane.innerHTML = `
+              <div style="display: grid; gap: 4px; margin-top: 4px;">
+                <div>${stats.files} file${stats.files === 1 ? '' : 's'} · ${stats.dirs} director${stats.dirs === 1 ? 'y' : 'ies'}</div>
+              </div>
+            `;
+          }
+        })
+        .catch((err) => {
+          if (requestId !== treeState.treeRequestId) return;
+          treeState.pane.textContent = 'Unable to load file tree.';
+          if (treeState.statsPane) {
+            treeState.statsPane.textContent = 'Unable to load file stats.';
+          }
+          console.error('filetree', err);
+        });
+    }
+
+    // Initialize file tree
+    (function () {
+      treeState.pane = document.getElementById('file-tree');
+      treeState.paneShell = document.getElementById('file-tree-pane');
+      const toggle = document.getElementById('file-tree-toggle');
+      treeState.statsPane = document.getElementById('file-stats');
+      if (!treeState.pane) return;
+      treeState.fileTreeUrl = new URL('{% url "ctf:thread_filetree" thread.uuid %}', window.location.origin);
+
+      if (toggle && treeState.paneShell) {
+        toggle.addEventListener('click', () => {
+          const collapsed = treeState.paneShell.getAttribute('data-collapsed') === 'true';
+          const nextCollapsed = !collapsed;
+          treeState.paneShell.setAttribute('data-collapsed', String(nextCollapsed));
+          toggle.textContent = nextCollapsed ? '▲' : '▼';
+          toggle.setAttribute('aria-expanded', String(!nextCollapsed));
+          toggle.setAttribute('aria-label', nextCollapsed ? 'Expand file tree' : 'Collapse file tree');
+        });
+      }
+
+      refreshFileTree();
+    })();
     (function () {
       const timeline = document.getElementById("timeline");
       const eventCount = document.getElementById("event-count");
@@ -524,7 +818,11 @@
       const sse = new EventSource(streamUrl.toString());
 
       sse.addEventListener("stream", (message) => {
-        renderEvent(JSON.parse(message.data));
+        const event = JSON.parse(message.data);
+        renderEvent(event);
+        if (isWorkspaceUpdatedEvent(event)) {
+          refreshFileTree({ flash: true });
+        }
       });
 
       sse.addEventListener("status", (message) => {

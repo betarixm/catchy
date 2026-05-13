@@ -1315,6 +1315,123 @@ class PublicThreadAccessTests(TestCase):
         self.assertNotContains(response, 'id="steer-form"')
         self.assertNotContains(response, ">Stop</button>")
 
+    def test_thread_filetree_shows_workspace_only(self) -> None:
+        thread = self._create_thread("workspace-tree", is_public=True)
+        self.client.force_login(self.user)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_root = Path(temp_dir) / f"thread-{thread.pk}"
+            workspace = thread_root / "workspace"
+            metadata = thread_root / "metadata"
+            source = thread_root / "source"
+            (workspace / "src").mkdir(parents=True)
+            metadata.mkdir(parents=True)
+            source.mkdir(parents=True)
+            (workspace / "README.md").write_text("hello\n", encoding="utf-8")
+            (workspace / "src" / "main.py").write_text("print('hi')\n", encoding="utf-8")
+            (metadata / "secret.txt").write_text("nope\n", encoding="utf-8")
+            (source / "archive.txt").write_text("nope\n", encoding="utf-8")
+
+            thread.thread_root = str(thread_root)
+            thread.workspace_path = str(workspace)
+            thread.metadata_path = str(metadata)
+            thread.save(
+                update_fields=[
+                    "thread_root",
+                    "workspace_path",
+                    "metadata_path",
+                    "updated_at",
+                ]
+            )
+
+            response = self.client.get(
+                reverse("ctf:thread_filetree", kwargs={"thread_uuid": thread.uuid})
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["name"], "workspace")
+        self.assertEqual(payload["type"], "dir")
+        child_names = {child["name"] for child in payload["children"]}
+        self.assertIn("README.md", child_names)
+        self.assertIn("src", child_names)
+        self.assertNotIn("metadata", child_names)
+        self.assertNotIn("source", child_names)
+
+    def test_thread_detail_includes_live_filetree_refresh_hook(self) -> None:
+        thread = self._create_thread("workspace-refresh", is_public=True)
+
+        response = self.client.get(thread.get_absolute_url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "event.source === \"system\" && event.kind === \"workspace.changed\"")
+        self.assertContains(response, "refreshFileTree()")
+        self.assertContains(response, "EventSource")
+        self.assertContains(response, "thread_filetree")
+
+    def test_thread_stream_replays_workspace_changed_stream_event(self) -> None:
+        thread = self._create_thread("workspace-stream", is_public=True)
+        StreamEvent.objects.create(
+            thread=thread,
+            sequence=1,
+            dedupe_key="workspace.changed:1",
+            source="system",
+            kind="workspace.changed",
+            text="Workspace updated",
+            raw={"changed_paths": ["workspace/src/main.py"]},
+        )
+
+        response = self.client.get(
+            reverse("ctf:thread_stream", kwargs={"thread_uuid": thread.uuid})
+        )
+        body = b"".join(response.streaming_content).decode()
+
+        self.assertIn('"kind": "workspace.changed"', body)
+        self.assertIn('"changed_paths": ["workspace/src/main.py"]', body)
+
+    def test_thread_filetree_shows_workspace_only(self) -> None:
+        thread = self._create_thread("workspace-only", is_public=True)
+        self.client.force_login(self.user)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thread_root = Path(temp_dir) / f"thread-{thread.pk}"
+            workspace = thread_root / "workspace"
+            metadata = thread_root / "metadata"
+            source = thread_root / "source"
+            (workspace / "src").mkdir(parents=True)
+            metadata.mkdir(parents=True)
+            source.mkdir(parents=True)
+            (workspace / "README.md").write_text("hello\n", encoding="utf-8")
+            (workspace / "src" / "main.py").write_text("print('hi')\n", encoding="utf-8")
+            (metadata / "secret.txt").write_text("nope\n", encoding="utf-8")
+            (source / "archive.txt").write_text("nope\n", encoding="utf-8")
+
+            thread.thread_root = str(thread_root)
+            thread.workspace_path = str(workspace)
+            thread.metadata_path = str(metadata)
+            thread.save(
+                update_fields=[
+                    "thread_root",
+                    "workspace_path",
+                    "metadata_path",
+                    "updated_at",
+                ]
+            )
+
+            response = self.client.get(
+                reverse("ctf:thread_filetree", kwargs={"thread_uuid": thread.uuid})
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["name"], "workspace")
+        self.assertEqual(payload["type"], "dir")
+        child_names = {child["name"] for child in payload["children"]}
+        self.assertIn("README.md", child_names)
+        self.assertIn("src", child_names)
+        self.assertNotIn("metadata", child_names)
+        self.assertNotIn("source", child_names)
+
     def test_authenticated_user_can_publish_and_unpublish_thread(self) -> None:
         thread = self._create_thread("publishable", is_public=False)
         self.client.force_login(self.user)

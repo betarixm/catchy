@@ -12,6 +12,7 @@ dependencies = [
     "gunicorn>=23.0.0",
     "omegaconf>=2.3.0",
     "psycopg[binary]>=3.3.0",
+    "watchdog>=6.0.0",
     "tzdata>=2026.2",
     "whitenoise>=6.9.0",
 ]

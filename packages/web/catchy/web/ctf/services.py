@@ -32,6 +32,8 @@ from django.core.exceptions import PermissionDenied
 from django.db import transaction
 from django.db.models import Max
 from django.utils import timezone
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
 from .models import (
     AgentConfiguration,
@@ -47,6 +49,72 @@ from .source_archives import safe_extract_archive
 
 _CODEX_RUNTIME_METADATA_DIRS = frozenset({".tmp", "tmp"})
 THREAD_COST_USD_KEY = "cost_usd"
+_WORKSPACE_REFRESH_DEBOUNCE_SECONDS = 0.35
+_workspace_refresh_lock = threading.Lock()
+_workspace_refresh_timers: dict[int, threading.Timer] = {}
+_workspace_refresh_paths: dict[int, list[str]] = {}
+
+
+class _WorkspaceEventHandler(FileSystemEventHandler):
+    def __init__(self, thread_id: int):
+        self.thread_id = thread_id
+
+    def on_any_event(self, event: Any) -> None:
+        if getattr(event, "is_directory", False):
+            return
+        path = getattr(event, "src_path", None) or getattr(event, "dest_path", None)
+        if not path:
+            return
+        _queue_workspace_changed_event(self.thread_id, str(path))
+
+
+def _start_workspace_observer(thread_id: int, workspace: Path) -> Any:
+    observer = Observer()
+    observer.schedule(_WorkspaceEventHandler(thread_id), str(workspace), recursive=True)
+    observer.start()
+    return observer
+
+
+def _queue_workspace_changed_event(thread_id: int, changed_path: str) -> None:
+    with _workspace_refresh_lock:
+        paths = _workspace_refresh_paths.setdefault(thread_id, [])
+        paths.append(changed_path)
+        if len(paths) > 20:
+            del paths[:-20]
+
+        timer = _workspace_refresh_timers.get(thread_id)
+        if timer is not None:
+            timer.cancel()
+
+        timer = threading.Timer(
+            _WORKSPACE_REFRESH_DEBOUNCE_SECONDS,
+            _flush_workspace_changed_event,
+            args=(thread_id,),
+        )
+        timer.daemon = True
+        _workspace_refresh_timers[thread_id] = timer
+        timer.start()
+
+
+def _record_workspace_changed_stream_event(thread_id: int, changed_paths: list[str]) -> None:
+    thread = Thread.objects.get(pk=thread_id)
+    _record_event(
+        thread,
+        source="system",
+        kind="workspace.changed",
+        text="Workspace updated",
+        raw={"changed_paths": changed_paths},
+    )
+
+
+def _flush_workspace_changed_event(thread_id: int) -> None:
+    with _workspace_refresh_lock:
+        changed_paths = _workspace_refresh_paths.pop(thread_id, [])
+        timer = _workspace_refresh_timers.pop(thread_id, None)
+    if timer is not None:
+        timer.cancel()
+    if changed_paths:
+        _record_workspace_changed_stream_event(thread_id, changed_paths)
 
 
 def start_thread(thread: Thread) -> Any:
@@ -173,6 +241,7 @@ def run_thread_sync(thread_id: int) -> None:
     )
     _record_event(thread, source="system", kind="thread.started", text="Thread started")
 
+    observer = _start_workspace_observer(thread.pk, workspace)
     try:
         agent = load_agent(
             thread.agent,
@@ -199,6 +268,8 @@ def run_thread_sync(thread_id: int) -> None:
             )
         )
     except Exception as exc:
+        observer.stop()
+        observer.join()
         Thread.objects.filter(pk=thread.pk).update(
             status=Thread.Status.FAILED,
             error=str(exc),
@@ -211,6 +282,8 @@ def run_thread_sync(thread_id: int) -> None:
         status=terminal_status,
         updated_at=timezone.now(),
     )
+    observer.stop()
+    observer.join()
     thread.status = terminal_status
     _record_event(
         thread,
