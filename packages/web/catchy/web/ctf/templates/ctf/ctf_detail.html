@@ -6,42 +6,75 @@
   <div class="crumbs reveal">
     <a href="{% url 'ctf:index' %}">Index</a>
     <span class="sep">/</span>
-    <a href="{% url 'ctf:index' %}">CTFs</a>
-    <span class="sep">/</span>
     <span class="now">{{ ctf.slug }}</span>
   </div>
 
   <div class="page-head">
     <div class="title">
-      <div class="muted" style="font-size: 13px; margin-bottom: 12px;">
-        CTF · <span class="mono">{{ ctf.slug }}</span>
-      </div>
-      <h1 class="display reveal" style="margin: 0;">{{ ctf.title }}</h1>
+      <h1 class="h-page reveal">{{ ctf.title }}</h1>
     </div>
     <div class="actions">
       {% if can_init %}
-        <a class="btn" href="{% url 'ctf:ctf_update' ctf.slug %}">Edit</a>
+        <a class="btn btn-ghost" href="{% url 'ctf:ctf_update' ctf.slug %}">Edit</a>
+        <a class="btn btn-primary" href="{% url 'ctf:challenge_create' ctf.slug %}">New challenge</a>
       {% endif %}
-      <a class="btn btn-primary" href="{% url 'ctf:challenge_create' ctf.slug %}">New challenge</a>
     </div>
   </div>
 
   {% if ctf.description %}
-    <section class="reveal" style="margin-bottom: 56px;">
+    <section class="reveal mb-5">
       {{ ctf.description|json_script:"ctf-description-md" }}
       <article class="prose" data-md-from="ctf-description-md"></article>
     </section>
   {% endif %}
 
   {% if ctf.prompt %}
-    <section class="reveal" style="margin-bottom: 56px;">
-      <div class="section-head" style="margin-bottom: 12px;">
-        <h2 style="font-size: clamp(20px, 2vw, 24px);">Prompt</h2>
+    <details class="reveal mb-5 ctf-prompt-collapsible">
+      <summary>
+        <span class="mono small">Prompt</span>
+        <span class="muted xsmall">appended to agent prompt</span>
+      </summary>
+      <div class="ctf-prompt-body">
+        {{ ctf.prompt|json_script:"ctf-prompt-md" }}
+        <article class="prose small" data-md-from="ctf-prompt-md"></article>
       </div>
-      {{ ctf.prompt|json_script:"ctf-prompt-md" }}
-      <article class="prose" data-md-from="ctf-prompt-md"></article>
+    </details>
+    <style>
+      .ctf-prompt-collapsible {
+        border: 1px solid var(--rule-soft);
+        background: var(--paper);
+      }
+      .ctf-prompt-collapsible > summary {
+        list-style: none;
+        cursor: pointer;
+        padding: 8px 14px;
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 14px;
+        color: var(--muted);
+      }
+      .ctf-prompt-collapsible > summary::-webkit-details-marker { display: none; }
+      .ctf-prompt-collapsible > summary:hover { background: var(--paper-2); }
+      .ctf-prompt-collapsible[open] > summary { border-bottom: 1px solid var(--rule-soft); }
+      .ctf-prompt-body { padding: 12px 16px; }
+      .prose.small { font-size: 14px; line-height: 1.6; color: var(--muted); }
+      .prose.small h1, .prose.small h2, .prose.small h3 { color: var(--ink); font-size: 18px; }
+    </style>
+  {% endif %}
+
+  {% with stats=thread_stats %}
+  {% if stats.total %}
+    <section class="reveal mb-5">
+      {% include "ctf/_stats_overview.html" with stats=stats %}
+      <div class="breakdown-grid">
+        {% include "ctf/_breakdown.html" with title="By challenge" rows=stats.by_challenge total=stats.total label_class="mono" %}
+        {% include "ctf/_breakdown.html" with title="By agent" rows=stats.by_agent total=stats.total %}
+        {% include "ctf/_breakdown.html" with title="By model" rows=stats.by_model total=stats.total label_class="mono" %}
+      </div>
     </section>
   {% endif %}
+  {% endwith %}
 
   <section class="reveal">
     <div class="section-head">
@@ -51,19 +84,25 @@
 
     <ul class="idx-list">
       {% for challenge in challenges %}
-        <li class="idx-row" onclick="window.location='{{ challenge.get_absolute_url }}'">
+        <li class="idx-row">
           <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
           <div class="idx-title">
-            <a href="{{ challenge.get_absolute_url }}">{{ challenge.challenge_id }}</a>
+            <a class="idx-link" href="{{ challenge.get_absolute_url }}">{{ challenge.challenge_id }}</a>
             {% if challenge.description %}
               <span class="idx-desc">{{ challenge.description|striptags|truncatechars:200 }}</span>
             {% endif %}
           </div>
           <span class="idx-meta"></span>
-          
         </li>
       {% empty %}
-        <li><div class="empty">No challenges yet.</div></li>
+        <li>
+          <div class="empty">
+            No challenges yet.
+            {% if can_init %}
+              <a class="btn btn-sm btn-primary empty-cta" href="{% url 'ctf:challenge_create' ctf.slug %}">Add a challenge</a>
+            {% endif %}
+          </div>
+        </li>
       {% endfor %}
     </ul>
   </section>

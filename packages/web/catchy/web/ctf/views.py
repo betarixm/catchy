@@ -70,10 +70,209 @@ class _ChallengeGroup(TypedDict):
     threads: list[Thread]
 
 
-class _ThreadGroup(TypedDict):
+class _ThreadGroup(TypedDict, total=False):
     ctf: Ctf
     challenges: list[_ChallengeGroup]
     thread_count: int
+    stats: dict[str, Any]
+
+
+def _bucket_init() -> dict[str, Any]:
+    return {"count": 0, "cost": 0.0, "has_cost": False, "by_status": {}}
+
+
+def _normalize_status(status: str) -> str:
+    """Fold 'stopped' into 'completed' — they are functionally equivalent."""
+    if str(status) == "stopped":
+        return "completed"
+    return status
+
+
+def _bucket_record(bucket: dict[str, Any], status: str, cost: float | None) -> None:
+    bucket["count"] += 1
+    folded = _normalize_status(status)
+    bucket["by_status"][folded] = bucket["by_status"].get(folded, 0) + 1
+    if cost is not None:
+        bucket["cost"] += cost
+        bucket["has_cost"] = True
+
+
+def _sorted_breakdown(bucket: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for label, entry in bucket.items():
+        rows.append(
+            {
+                "label": label,
+                "count": entry["count"],
+                "cost": entry["cost"] if entry["has_cost"] else None,
+                "completed": entry["by_status"].get(Thread.Status.COMPLETED, 0),
+                "running": entry["by_status"].get(Thread.Status.RUNNING, 0),
+                "failed": entry["by_status"].get(Thread.Status.FAILED, 0),
+            }
+        )
+    rows.sort(key=lambda r: (-r["count"], r["label"]))
+    return rows
+
+
+def _thread_stats(threads: list[Thread]) -> dict[str, Any]:
+    """Aggregate stats over threads with `latest_cost_usd` already attached.
+
+    Returns totals plus per-dimension breakdowns (status, agent, model, provider,
+    credential, ctf, challenge).
+    """
+    by_status: dict[str, int] = {}
+    by_agent: dict[str, dict[str, Any]] = {}
+    by_model: dict[str, dict[str, Any]] = {}
+    by_provider: dict[str, dict[str, Any]] = {}
+    by_credential: dict[str, dict[str, Any]] = {}
+    by_ctf: dict[str, dict[str, Any]] = {}
+    by_challenge: dict[str, dict[str, Any]] = {}
+    total_cost = 0.0
+    has_cost = False
+    earliest: Any = None
+    latest: Any = None
+
+    for thread in threads:
+        status = thread.status
+        by_status[status] = by_status.get(status, 0) + 1
+        cost_raw = getattr(thread, "latest_cost_usd", None)
+        cost = float(cost_raw) if cost_raw is not None else None
+        if cost is not None:
+            total_cost += cost
+            has_cost = True
+
+        agent_name = thread.agent.name if thread.agent_id else "—"
+        model_name = thread.model.name if thread.model_id else "—"
+        if thread.credential_id and thread.credential is not None:
+            provider_name = (
+                thread.credential.provider.name
+                if thread.credential.provider_id
+                else "—"
+            )
+            credential_name = thread.credential.name
+        else:
+            provider_name = "—"
+            credential_name = "—"
+        ctf_title = thread.ctf.title
+        challenge_id = thread.challenge.challenge_id
+
+        for bucket, key in (
+            (by_agent, agent_name),
+            (by_model, model_name),
+            (by_provider, provider_name),
+            (by_credential, credential_name),
+            (by_ctf, ctf_title),
+            (by_challenge, challenge_id),
+        ):
+            entry = bucket.setdefault(key, _bucket_init())
+            _bucket_record(entry, status, cost)
+
+        if earliest is None or thread.created_at < earliest:
+            earliest = thread.created_at
+        if latest is None or thread.updated_at > latest:
+            latest = thread.updated_at
+
+    completed_count = by_status.get("completed", 0) + by_status.get("stopped", 0)
+    return {
+        "total": len(threads),
+        "by_status": by_status,
+        "completed": completed_count,
+        "running": by_status.get("running", 0),
+        "queued": by_status.get("queued", 0),
+        "waiting": by_status.get("waiting", 0),
+        "failed": by_status.get("failed", 0),
+        "total_cost": total_cost if has_cost else None,
+        "earliest": earliest,
+        "latest": latest,
+        "by_agent": _sorted_breakdown(by_agent),
+        "by_model": _sorted_breakdown(by_model),
+        "by_provider": _sorted_breakdown(by_provider),
+        "by_credential": _sorted_breakdown(by_credential),
+        "by_ctf": _sorted_breakdown(by_ctf),
+        "by_challenge": _sorted_breakdown(by_challenge),
+    }
+
+
+def _thread_event_stats(
+    events: list[StreamEvent], thread: Thread
+) -> dict[str, Any]:
+    """Aggregate per-event stats for a single thread."""
+    by_format: dict[str, int] = {}
+    by_source: dict[str, int] = {}
+    by_kind: dict[str, int] = {}
+    earliest: Any = None
+    latest: Any = None
+
+    for event in events:
+        by_format[event.format] = by_format.get(event.format, 0) + 1
+        if earliest is None or event.created_at < earliest:
+            earliest = event.created_at
+        if latest is None or event.created_at > latest:
+            latest = event.created_at
+
+    renderers: dict[str, EventRenderer[Any]] = {}
+    for event in events:
+        payload = _event_payload(event, thread=thread, renderers=renderers)
+        src = str(payload.get("source") or "—")
+        kind = str(payload.get("kind") or "—")
+        by_source[src] = by_source.get(src, 0) + 1
+        by_kind[kind] = by_kind.get(kind, 0) + 1
+
+    usage = _latest_token_usage_from_thread(thread)
+    duration_seconds = None
+    if earliest is not None and latest is not None:
+        delta = latest - earliest
+        duration_seconds = delta.total_seconds()
+
+    return {
+        "events": len(events),
+        "duration_seconds": duration_seconds,
+        "started_at": earliest,
+        "last_event_at": latest,
+        "by_format": _sorted_count_map(by_format),
+        "by_source": _sorted_count_map(by_source),
+        "by_kind": _sorted_count_map(by_kind),
+        "token_usage": usage,
+    }
+
+
+def _thread_counts_by(
+    queryset: QuerySet[Any], field_name: str
+) -> dict[int, int]:
+    """Group Thread rows by a foreign-key id and return a map of id → count."""
+    counts: dict[int, int] = {}
+    for row in queryset:
+        pk = row.get(field_name) if isinstance(row, dict) else None
+        if pk is None:
+            continue
+        counts[pk] = counts.get(pk, 0) + 1
+    return counts
+
+
+def _sorted_count_map(data: dict[str, int]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = [
+        {"label": label, "count": count, "cost": None}
+        for label, count in data.items()
+    ]
+    rows.sort(key=lambda r: (-r["count"], r["label"]))
+    return rows
+
+
+def _latest_token_usage_from_thread(thread: Thread) -> dict[str, Any] | None:
+    raw = thread.latest_cost if isinstance(thread.latest_cost, dict) else None
+    if not raw:
+        return None
+    return {
+        "provider": raw.get("provider"),
+        "model": raw.get("model"),
+        "input": raw.get("input_tokens"),
+        "cached_input": raw.get("cached_input_tokens"),
+        "cache_creation": raw.get("cache_creation_input_tokens"),
+        "cache_read": raw.get("cache_read_input_tokens"),
+        "output": raw.get("output_tokens"),
+        "reasoning": raw.get("reasoning_output_tokens"),
+        "total": raw.get("total_tokens"),
+    }
 
 
 def index(request: HttpRequest) -> HttpResponse:
@@ -86,22 +285,23 @@ def index(request: HttpRequest) -> HttpResponse:
     thread_filter = Q(is_public=True)
     if request.user.is_authenticated:
         thread_filter |= Q(ctf_id__in=ctf_ids)
-    threads = _attach_thread_costs(
-        _attach_credential_visibility(
-            Thread.objects.select_related(
-                "ctf",
-                "challenge",
-                "agent",
-                "model",
-                "credential",
-                "credential__provider",
-            )
-            .prefetch_related("credential__allowed_groups", "credential__allowed_users")
-            .filter(thread_filter)
-            .distinct()[:20],
-            request.user,
+    visible_threads_qs = (
+        Thread.objects.select_related(
+            "ctf",
+            "challenge",
+            "agent",
+            "model",
+            "credential",
+            "credential__provider",
         )
+        .prefetch_related("credential__allowed_groups", "credential__allowed_users")
+        .filter(thread_filter)
+        .distinct()
     )
+    visible_threads = _attach_thread_costs(
+        _attach_credential_visibility(list(visible_threads_qs), request.user)
+    )
+    threads = visible_threads[:20]
     public_thread_groups = _group_threads_by_ctf_and_challenge(
         _attach_thread_costs(
             _attach_credential_visibility(
@@ -122,6 +322,13 @@ def index(request: HttpRequest) -> HttpResponse:
         )
     )
     public_thread_count = sum(group["thread_count"] for group in public_thread_groups)
+    stats = _thread_stats(visible_threads)
+    # Per-CTF stats over the public threads of each group.
+    for group in public_thread_groups:
+        group_threads: list[Thread] = []
+        for ch in group["challenges"]:
+            group_threads.extend(ch["threads"])
+        group["stats"] = _thread_stats(group_threads)
     return render(
         request,
         "ctf/index.html",
@@ -130,6 +337,7 @@ def index(request: HttpRequest) -> HttpResponse:
             "threads": threads,
             "public_thread_groups": public_thread_groups,
             "public_thread_count": public_thread_count,
+            "thread_stats": stats,
         },
     )
 
@@ -143,10 +351,17 @@ def credential_list(request: HttpRequest) -> HttpResponse:
         ).prefetch_related("allowed_groups", "allowed_users")
         if credential.can_view(request.user)
     ]
+    usage_map = _thread_counts_by(Thread.objects.values("credential_id"), "credential_id")
+    for credential in credentials:
+        credential.thread_count = usage_map.get(credential.pk, 0)
+    total_threads = sum(c.thread_count for c in credentials)
     return render(
         request,
         "ctf/credential_list.html",
-        {"credentials": credentials},
+        {
+            "credentials": credentials,
+            "list_stats": {"count": len(credentials), "thread_total": total_threads},
+        },
     )
 
 
@@ -191,7 +406,29 @@ def credential_update(request: HttpRequest, slug: str) -> HttpResponse:
 @login_required
 def provider_list(request: HttpRequest) -> HttpResponse:
     providers = list(Provider.objects.all())
-    return render(request, "ctf/provider_list.html", {"providers": providers})
+    credential_counts: dict[int, int] = {}
+    for row in Credential.objects.values("provider_id"):
+        pk = row.get("provider_id")
+        if pk is not None:
+            credential_counts[pk] = credential_counts.get(pk, 0) + 1
+    pricing_counts: dict[int, int] = {}
+    for row in ModelPricing.objects.values("provider_id"):
+        pk = row.get("provider_id")
+        if pk is not None:
+            pricing_counts[pk] = pricing_counts.get(pk, 0) + 1
+    for provider in providers:
+        provider.credential_count = credential_counts.get(provider.pk, 0)
+        provider.pricing_count = pricing_counts.get(provider.pk, 0)
+    list_stats = {
+        "count": len(providers),
+        "credentials_total": sum(credential_counts.values()),
+        "pricing_total": sum(pricing_counts.values()),
+    }
+    return render(
+        request,
+        "ctf/provider_list.html",
+        {"providers": providers, "list_stats": list_stats},
+    )
 
 
 @login_required
@@ -232,7 +469,23 @@ def model_list(request: HttpRequest) -> HttpResponse:
         )
         if model.can_view(request.user)
     ]
-    return render(request, "ctf/model_list.html", {"models": models})
+    usage_map = _thread_counts_by(Thread.objects.values("model_id"), "model_id")
+    pricing_map: dict[int, int] = {}
+    for row in ModelPricing.objects.values("model_id"):
+        pk = row.get("model_id")
+        if pk is not None:
+            pricing_map[pk] = pricing_map.get(pk, 0) + 1
+    for model in models:
+        model.thread_count = usage_map.get(model.pk, 0)
+        model.pricing_count = pricing_map.get(model.pk, 0)
+    list_stats = {
+        "count": len(models),
+        "thread_total": sum(m.thread_count for m in models),
+        "priced": sum(1 for m in models if m.pricing_count),
+    }
+    return render(
+        request, "ctf/model_list.html", {"models": models, "list_stats": list_stats}
+    )
 
 
 @login_required
@@ -278,7 +531,18 @@ def pricing_list(request: HttpRequest) -> HttpResponse:
         ).prefetch_related("model__view_groups")
         if item.model.can_view(request.user)
     ]
-    return render(request, "ctf/pricing_list.html", {"pricing": pricing})
+    providers_seen = {item.provider_id for item in pricing if item.provider_id}
+    models_seen = {item.model_id for item in pricing if item.model_id}
+    list_stats = {
+        "count": len(pricing),
+        "providers": len(providers_seen),
+        "models": len(models_seen),
+    }
+    return render(
+        request,
+        "ctf/pricing_list.html",
+        {"pricing": pricing, "list_stats": list_stats},
+    )
 
 
 @login_required
@@ -327,7 +591,17 @@ def agent_list(request: HttpRequest) -> HttpResponse:
         )
         if agent.can_view(request.user)
     ]
-    return render(request, "ctf/agent_list.html", {"agents": agents})
+    usage_map = _thread_counts_by(Thread.objects.values("agent_id"), "agent_id")
+    for agent in agents:
+        agent.thread_count = usage_map.get(agent.pk, 0)
+    list_stats = {
+        "count": len(agents),
+        "thread_total": sum(a.thread_count for a in agents),
+        "active": sum(1 for a in agents if a.thread_count),
+    }
+    return render(
+        request, "ctf/agent_list.html", {"agents": agents, "list_stats": list_stats}
+    )
 
 
 @login_required
@@ -374,10 +648,14 @@ def agent_detail(request: HttpRequest, slug: str) -> HttpResponse:
         resolves = True
     except Exception as exc:
         messages.error(request, f"Could not resolve YAML: {exc}")
+    agent_threads = _attach_thread_costs(
+        Thread.objects.filter(agent=agent).select_related("model")
+    )
+    stats = _thread_stats(agent_threads)
     return render(
         request,
         "ctf/agent_detail.html",
-        {"agent": agent, "resolves": resolves},
+        {"agent": agent, "resolves": resolves, "thread_stats": stats},
     )
 
 
@@ -421,13 +699,20 @@ def ctf_detail(request: HttpRequest, slug: str) -> HttpResponse:
     if not ctf.can_view(request.user):
         raise PermissionDenied
 
+    challenges = list(ctf.challenges.all())
+    ctf_threads = _attach_thread_costs(
+        Thread.objects.filter(ctf=ctf).select_related("model")
+    )
+    stats = _thread_stats(ctf_threads)
+    stats["challenge_count"] = len(challenges)
     return render(
         request,
         "ctf/ctf_detail.html",
         {
             "ctf": ctf,
-            "challenges": ctf.challenges.all(),
+            "challenges": challenges,
             "can_init": ctf.can_init_thread(request.user),
+            "thread_stats": stats,
         },
     )
 
@@ -505,6 +790,7 @@ def challenge_detail(
             request.user,
         )
     )
+    stats = _thread_stats(threads)
     return render(
         request,
         "ctf/challenge_detail.html",
@@ -514,6 +800,7 @@ def challenge_detail(
             "threads": threads,
             "thread_form": thread_form,
             "can_init": ctf.can_init_thread(request.user),
+            "thread_stats": stats,
         },
     )
 
@@ -595,6 +882,7 @@ def thread_detail(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     events = list(thread.events.all()[:2000])
     model_name = thread.model.name if thread.model is not None else None
     latest_cost_usd = cached_token_usage_cost_usd(thread, model_name=model_name)
+    thread_event_stats = _thread_event_stats(events, thread)
     return render(
         request,
         "ctf/thread_detail.html",
@@ -608,6 +896,7 @@ def thread_detail(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
             and thread.status in promptable_statuses,
             "can_stop_thread": can_manage_thread
             and thread.status in stoppable_statuses,
+            "event_stats": thread_event_stats,
         },
     )
 

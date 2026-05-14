@@ -1,11 +1,11 @@
 {% extends "base.html" %}
+{% load ctf_form %}
 
 {% block title %}Thread {{ thread.uuid }} — Catchy{% endblock %}
 
 {% block content %}
-  <div style="display: flex; gap: 20px; width: 100%;">
-    <!-- Left 70% -->
-    <div style="flex: 0 0 70%; min-width: 0;">
+  <div class="thread-layout">
+    <div class="thread-main">
       <div class="crumbs reveal">
         <a href="{% url 'ctf:index' %}">Index</a>
         <span class="sep">/</span>
@@ -24,91 +24,162 @@
         <span class="now">#{{ thread.pk }}</span>
       </div>
 
-  <div class="page-head">
-    <div class="title">
-      <div class="muted" style="font-size: 13px; margin-bottom: 12px;">
-        Thread · <span class="mono">{{ thread.uuid }}</span>
-      </div>
-      <h1 class="display reveal" style="margin: 0;">{{ thread }}</h1>
-      <div class="row" style="margin-top: 18px;">
-        <span class="status status-{{ thread.status }}" id="status-label">
-          <span id="status">{{ thread.status }}</span>
-        </span>
-        {% if thread.is_public %}
-          <span class="status status-public">public</span>
-        {% endif %}
-        {% if thread.agent %}
-          <span class="muted" style="font-size: 13px;">agent · {{ thread.agent.name }}</span>
-        {% endif %}
-        {% if thread.model %}
-          <span class="muted" style="font-size: 13px;">model · {{ thread.model.name }}</span>
-        {% endif %}
-        {% if thread.can_show_credential %}
-          <span class="muted" style="font-size: 13px;">credential · {{ thread.credential.name }}</span>
-        {% endif %}
-        {% if latest_cost_usd != None %}
-          <span class="muted" style="font-size: 13px;">cost · ${{ latest_cost_usd }}</span>
-        {% endif %}
-      </div>
-    </div>
-    <div class="actions">
-      <a class="btn" href="{% url 'ctf:thread_handoff_markdown' thread.uuid %}" target="_blank" rel="noopener">Export handoff (.md)</a>
-      {% if can_manage_thread %}
-        <form action="{% url 'ctf:thread_publish' thread.uuid %}" method="post" style="margin: 0;">
-          {% csrf_token %}
-          {% if thread.is_public %}
-            <input type="hidden" name="is_public" value="0">
-            <button type="submit" class="btn">Unpublish</button>
-          {% else %}
-            <input type="hidden" name="is_public" value="1">
-            <button type="submit" class="btn btn-primary">Publish</button>
+      <div class="page-head">
+        <div class="title">
+          <h1 class="h-page reveal">{{ thread }}</h1>
+          <div class="meta-row mono small muted">
+            <span class="pill pill-{{ thread.status|display_status }}" id="status-label">
+              <span id="status">{{ thread.status|display_status }}</span>
+            </span>
+            {% if thread.is_public %}
+              <span class="pill pill-public">public</span>
+            {% endif %}
+            {% if thread.agent %}{{ thread.agent.name }}{% endif %}
+            {% if thread.model %}<span class="mute2">·</span> {{ thread.model.name }}{% endif %}
+            {% if thread.can_show_credential %}<span class="mute2">·</span> {{ thread.credential.name }}{% endif %}
+          </div>
+        </div>
+        <div class="actions">
+          <a class="btn btn-ghost btn-sm" href="{% url 'ctf:thread_handoff_markdown' thread.uuid %}" target="_blank" rel="noopener">Export .md</a>
+          {% if can_manage_thread %}
+            <form action="{% url 'ctf:thread_publish' thread.uuid %}" method="post" style="margin: 0;">
+              {% csrf_token %}
+              {% if thread.is_public %}
+                <input type="hidden" name="is_public" value="0">
+                <button type="submit" class="btn btn-ghost btn-sm">Unpublish</button>
+              {% else %}
+                <input type="hidden" name="is_public" value="1">
+                <button type="submit" class="btn btn-primary btn-sm">Publish</button>
+              {% endif %}
+            </form>
           {% endif %}
-        </form>
-      {% endif %}
-    </div>
-  </div>
+        </div>
+      </div>
 
       {% if thread.error %}
-        <div class="panel reveal" style="border-color: var(--err); margin-bottom: 32px;">
+        <div class="panel reveal mb-5" style="border-color: var(--err);">
           <div class="panel-head" style="background: var(--err); color: #fff; border-color: var(--err);">
-            <span style="color: #fff; font-weight: 500;">Error</span>
-            <span style="color: rgba(255,255,255,0.8); font-size: 13px;">stream halted</span>
+            <strong style="color: #fff;">Error</strong>
+            <span style="color: rgba(255,255,255,0.85);">stream halted</span>
           </div>
           <pre>{{ thread.error }}</pre>
         </div>
       {% endif %}
 
+      {% if event_stats %}
+        <section class="reveal mb-5">
+          <section class="stats" aria-label="Run">
+            <div class="stat">
+              <div class="stat-label">Events</div>
+              <div class="stat-value num">{{ event_stats.events }}</div>
+            </div>
+            {% if event_stats.duration_seconds %}
+              <div class="stat">
+                <div class="stat-label">Duration</div>
+                <div class="stat-value small-num num">
+                  {% if event_stats.duration_seconds < 60 %}{{ event_stats.duration_seconds|floatformat:1 }}s
+                  {% elif event_stats.duration_seconds < 3600 %}{% widthratio event_stats.duration_seconds 60 1 %}m
+                  {% else %}{% widthratio event_stats.duration_seconds 3600 1 %}h
+                  {% endif %}
+                </div>
+              </div>
+            {% endif %}
+            {% if latest_cost_usd is not None %}
+              <div class="stat">
+                <div class="stat-label">Cost</div>
+                <div class="stat-value small-num num">${{ latest_cost_usd|floatformat:4 }}</div>
+              </div>
+            {% endif %}
+            {% if event_stats.token_usage and event_stats.token_usage.total %}
+              <div class="stat">
+                <div class="stat-label">Total tokens</div>
+                <div class="stat-value small-num num">{{ event_stats.token_usage.total }}</div>
+              </div>
+            {% endif %}
+            {% if event_stats.token_usage and event_stats.token_usage.input %}
+              <div class="stat">
+                <div class="stat-label">Input</div>
+                <div class="stat-value small-num num">{{ event_stats.token_usage.input }}</div>
+              </div>
+            {% endif %}
+            {% if event_stats.token_usage and event_stats.token_usage.output %}
+              <div class="stat">
+                <div class="stat-label">Output</div>
+                <div class="stat-value small-num num">{{ event_stats.token_usage.output }}</div>
+              </div>
+            {% endif %}
+            {% if event_stats.token_usage and event_stats.token_usage.cached_input %}
+              <div class="stat">
+                <div class="stat-label">Cached</div>
+                <div class="stat-value small-num num">{{ event_stats.token_usage.cached_input }}</div>
+              </div>
+            {% endif %}
+            {% if event_stats.token_usage and event_stats.token_usage.reasoning %}
+              <div class="stat">
+                <div class="stat-label">Reasoning</div>
+                <div class="stat-value small-num num">{{ event_stats.token_usage.reasoning }}</div>
+              </div>
+            {% endif %}
+          </section>
+
+          <div class="breakdown-grid">
+            {% include "ctf/_breakdown.html" with title="Events by source" rows=event_stats.by_source total=event_stats.events label_class="mono" %}
+            {% include "ctf/_breakdown.html" with title="Events by kind" rows=event_stats.by_kind total=event_stats.events label_class="mono" %}
+          </div>
+        </section>
+      {% endif %}
+
+      <section class="reveal">
+        <div class="section-head">
+          <h2>Timeline</h2>
+          <span class="meta"><span id="event-count">0</span> event{{ thread.events.count|pluralize }}</span>
+        </div>
+        <div class="timeline" id="timeline"></div>
+      </section>
+    </div>
+
+    <aside class="file-pane" id="file-tree-pane" data-collapsed="false" data-refreshing="false">
+      <div class="file-pane-head">
+        <h3 class="file-pane-title">Files</h3>
+        <button type="button" id="file-tree-toggle" class="file-pane-toggle" aria-label="Collapse file tree" aria-expanded="true">▾</button>
+      </div>
+      <div id="file-stats" class="file-pane-stats">Loading…</div>
+      <div id="file-tree" class="file-pane-body">Loading file tree…</div>
+    </aside>
+  </div>
+
   {% if can_manage_thread %}
-    <div class="thread-floating">
-      <div class="thread-floating-actions">
+    <div class="composer">
+      <div class="composer-actions">
         <form action="{% url 'ctf:thread_fork' thread.uuid %}" method="post">
           {% csrf_token %}
-          <button type="submit" class="thread-floating-btn">Fork</button>
+          <button type="submit" class="composer-btn">Fork</button>
         </form>
         {% if can_stop_thread %}
           <form action="{% url 'ctf:thread_stop' thread.uuid %}" method="post">
             {% csrf_token %}
-            <button type="submit" class="thread-floating-btn">Stop</button>
+            <button type="submit" class="composer-btn danger">Stop</button>
           </form>
         {% endif %}
       </div>
       {% if can_prompt_thread %}
-        <form class="steer-floating" id="steer-form" action="{% url 'ctf:thread_steer' thread.uuid %}" method="post">
+        <form class="composer-input" id="steer-form" action="{% url 'ctf:thread_steer' thread.uuid %}" method="post">
           {% csrf_token %}
           <textarea name="text" rows="1" required placeholder="message the thread…" id="steer-text"></textarea>
-          <button type="submit" class="steer-send" aria-label="Send" title="Send">↑</button>
+          <span class="composer-hint" aria-hidden="true">↵ to send · ⇧↵ for newline</span>
+          <button type="submit" class="composer-send" aria-label="Send" title="Send">↑</button>
         </form>
       {% endif %}
     </div>
     {% if can_prompt_thread %}
       <script>
         (function () {
-          document.body.classList.add("has-steer");
+          document.body.classList.add("has-composer");
           const ta = document.getElementById("steer-text");
           const form = document.getElementById("steer-form");
           function autoGrow() {
             ta.style.height = "auto";
-            ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
+            ta.style.height = Math.min(ta.scrollHeight, 240) + "px";
           }
           ta.addEventListener("input", autoGrow);
           ta.addEventListener("keydown", (e) => {
@@ -123,36 +194,7 @@
     {% endif %}
   {% endif %}
 
-      <section class="reveal">
-        <div class="section-head" style="margin-bottom: 20px;">
-          <h2>Timeline</h2>
-          <span class="meta"><span id="event-count">0</span> event{{ thread.events.count|pluralize }}</span>
-        </div>
-        <div class="timeline" id="timeline"></div>
-      </section>
-    </div>
-
-    <!-- Right 30% -->
-    <aside id="file-tree-pane" data-collapsed="false" data-refreshing="false" style="flex: 0 0 30%; display: flex; flex-direction: column; max-height: calc(100vh - 160px); position: sticky; top: 120px; align-self: flex-start; transition: width 0.2s ease, flex-basis 0.2s ease;">
-      <div class="file-tree-head" style="padding: 16px; border: 1px solid var(--rule-soft); background: var(--paper); display: flex; align-items: flex-start; gap: 10px;">
-        <div style="flex: 1; min-width: 0;">
-          <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
-            <h3 style="margin: 0; font-size: 18px; font-weight: 500; font-family: var(--serif);">Files</h3>
-            <button type="button" id="file-tree-toggle" aria-label="Collapse file tree" aria-expanded="true" style="margin-left: auto; border: 0; background: transparent; color: var(--ink); cursor: pointer; font-family: var(--mono); font-size: 18px; line-height: 1; padding: 0 2px;">▾</button>
-          </div>
-          <div id="file-stats" style="font-size: 12px; color: var(--muted); font-family: var(--sans);">
-            <div style="margin-top: 4px;">Loading…</div>
-          </div>
-        </div>
-      </div>
-      <div id="file-tree" style="flex: 1; overflow: auto; padding: 12px 16px; border: 1px solid var(--rule-soft); background: var(--paper-deep);">
-        Loading file tree…
-      </div>
-    </aside>
-  </div>
-
   {{ events_json|json_script:"events-data" }}
-
 {% endblock %}
 
 {% block scripts %}
@@ -160,46 +202,101 @@
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.5/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/ansi_up@5.2.1/ansi_up.min.js"></script>
   <style>
-    @import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css");
+    /* ===== Two-column thread layout ===== */
+    .thread-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 320px;
+      gap: 32px;
+      align-items: start;
+    }
+    .thread-main { min-width: 0; }
+    @media (max-width: 1080px) {
+      .thread-layout { grid-template-columns: 1fr; gap: 24px; }
+    }
 
-    #file-tree-pane {
+    /* ===== File pane ===== */
+    .file-pane {
+      position: sticky;
+      top: 80px;
+      align-self: start;
+      display: flex;
+      flex-direction: column;
+      max-height: calc(100vh - 120px);
+      border: 1px solid var(--rule);
+      background: var(--paper);
       font-family: var(--mono);
       font-size: 12px;
+      transition: box-shadow 0.2s ease, border-color 0.2s ease;
     }
-    #file-tree-pane[data-collapsed="true"] {
+    .file-pane[data-collapsed="true"] {
       max-height: none;
-      flex-basis: auto;
     }
-    #file-tree-pane[data-collapsed="false"] > .file-tree-head {
-      border-bottom: none;
-    }
-    #file-tree-pane[data-collapsed="true"] #file-tree {
+    .file-pane[data-collapsed="true"] .file-pane-body,
+    .file-pane[data-collapsed="true"] .file-pane-stats {
       display: none;
     }
-    #file-tree-pane[data-collapsed="true"] > .file-tree-head {
+    .file-pane-head {
+      padding: 14px 16px;
       border-bottom: 1px solid var(--rule-soft);
+      display: flex;
+      align-items: center;
+      gap: 10px;
     }
-    #file-tree-pane[data-refreshing="true"] > .file-tree-head,
-    #file-tree-pane[data-refreshing="true"] #file-tree {
-      border-color: #7CFF5B;
+    .file-pane[data-collapsed="true"] .file-pane-head {
+      border-bottom: 0;
+    }
+    .file-pane-title {
+      margin: 0;
+      font-family: var(--serif);
+      font-size: 18px;
+      font-weight: 500;
+      letter-spacing: -0.01em;
+      flex: 1;
+    }
+    .file-pane-toggle {
+      border: 0;
+      background: transparent;
+      color: var(--ink);
+      cursor: pointer;
+      font-family: var(--mono);
+      font-size: 16px;
+      line-height: 1;
+      padding: 4px 6px;
+      transition: color 0.15s ease;
+    }
+    .file-pane-toggle:hover { color: var(--muted); }
+    .file-pane-stats {
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--rule-soft);
+      font-family: var(--sans);
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .file-pane-body {
+      flex: 1;
+      overflow: auto;
+      padding: 12px 16px;
+      background: var(--paper-2);
+    }
+    .file-pane[data-refreshing="true"] {
+      border-color: rgba(124, 255, 91, 0.6);
       box-shadow:
         0 0 0 1px rgba(124, 255, 91, 0.55),
-        0 0 14px rgba(124, 255, 91, 0.45),
-        0 0 28px rgba(124, 255, 91, 0.18);
-      animation: filetree-neon-blink 0.9s ease-in-out 0s 2;
+        0 0 14px rgba(124, 255, 91, 0.32),
+        0 0 28px rgba(124, 255, 91, 0.12);
+      animation: filetree-blink 0.9s ease-in-out 0s 2;
     }
-    @keyframes filetree-neon-blink {
+    @keyframes filetree-blink {
       0%, 100% {
         box-shadow:
           0 0 0 1px rgba(124, 255, 91, 0.35),
-          0 0 8px rgba(124, 255, 91, 0.24),
-          0 0 18px rgba(124, 255, 91, 0.10);
+          0 0 8px rgba(124, 255, 91, 0.18);
       }
       50% {
         box-shadow:
           0 0 0 1px rgba(124, 255, 91, 0.9),
-          0 0 18px rgba(124, 255, 91, 0.7),
-          0 0 40px rgba(124, 255, 91, 0.35);
+          0 0 18px rgba(124, 255, 91, 0.55),
+          0 0 38px rgba(124, 255, 91, 0.28);
       }
     }
     #file-tree ul {
@@ -217,9 +314,7 @@
       user-select: none;
       cursor: pointer;
     }
-    #file-tree .tree-item-file {
-      cursor: default;
-    }
+    #file-tree .tree-item-file { cursor: default; }
     #file-tree .tree-item-icon {
       width: 16px;
       display: inline-block;
@@ -236,30 +331,16 @@
       display: none;
       padding-left: 12px;
     }
-    #file-tree .tree-children.open {
-      display: block;
-    }
+    #file-tree .tree-children.open { display: block; }
     #file-tree .tree-prefix {
       display: inline-block;
       width: 12px;
-      color: var(--muted);
+      color: var(--mute2);
       font-size: 11px;
       margin-right: 2px;
       flex-shrink: 0;
       font-family: var(--mono);
     }
-    #file-stats {
-      font-family: var(--sans);
-    }
-    .bubble-row.thinking { align-self: stretch; max-width: 92%; }
-    .bubble.thinking {
-      background: var(--paper-deep);
-      color: var(--muted);
-      font-style: italic;
-      border-color: var(--rule-soft);
-    }
-    .bubble.thinking p,
-    .bubble.thinking li { font-style: italic; }
   </style>
 
   <script>
@@ -274,7 +355,7 @@
       return false;
     }
 
-    // File tree state and functions
+    // ===== File tree =====
     let treeState = {
       pane: null,
       paneShell: null,
@@ -303,18 +384,6 @@
       return stats;
     }
 
-    function formatBytes(bytes) {
-      if (!bytes) return '0 B';
-      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-      let value = bytes;
-      let unitIndex = 0;
-      while (value >= 1024 && unitIndex < units.length - 1) {
-        value /= 1024;
-        unitIndex += 1;
-      }
-      return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
-    }
-
     function flashFileTreePane() {
       if (!treeState.paneShell) return;
       treeState.paneShell.setAttribute('data-refreshing', 'true');
@@ -332,19 +401,16 @@
       const itemDiv = document.createElement('div');
       itemDiv.className = node.type === 'dir' ? 'tree-item' : 'tree-item tree-item-file';
 
-      // Prefix (hierarchy lines)
       const prefixSpan = document.createElement('span');
       prefixSpan.className = 'tree-prefix';
       prefixSpan.textContent = isLast ? '└' : '├';
       itemDiv.appendChild(prefixSpan);
 
-      // Icon
       const iconSpan = document.createElement('span');
       iconSpan.className = 'tree-item-icon';
       iconSpan.textContent = node.type === 'dir' ? '📁' : '📄';
       itemDiv.appendChild(iconSpan);
 
-      // Name
       const nameSpan = document.createElement('span');
       nameSpan.className = 'tree-item-name';
       nameSpan.textContent = node.name || '';
@@ -352,7 +418,6 @@
 
       li.appendChild(itemDiv);
 
-      // Children
       if (node.type === 'dir' && Array.isArray(node.children) && node.children.length > 0) {
         const childrenDiv = document.createElement('div');
         childrenDiv.className = 'tree-children';
@@ -376,7 +441,6 @@
         itemDiv.addEventListener('click', (e) => {
           e.stopPropagation();
           childrenDiv.classList.toggle('open');
-          // Toggle icon
           const nodePath = node.path || '';
           if (childrenDiv.classList.contains('open')) {
             expandedState.add(nodePath);
@@ -393,9 +457,7 @@
 
     function refreshFileTree({ flash = false } = {}) {
       const requestId = ++treeState.treeRequestId;
-      if (flash) {
-        flashFileTreePane();
-      }
+      if (flash) flashFileTreePane();
       fetch(treeState.fileTreeUrl, { cache: 'no-store' })
         .then((r) => r.ok ? r.json() : Promise.reject(r))
         .then((tree) => {
@@ -406,11 +468,8 @@
           rootUl.appendChild(renderNode(tree, true, treeState.expandedPaths));
           treeState.pane.appendChild(rootUl);
           if (treeState.statsPane) {
-            treeState.statsPane.innerHTML = `
-              <div style="display: grid; gap: 4px; margin-top: 4px;">
-                <div>${stats.files} file${stats.files === 1 ? '' : 's'} · ${stats.dirs} director${stats.dirs === 1 ? 'y' : 'ies'}</div>
-              </div>
-            `;
+            treeState.statsPane.textContent =
+              `${stats.files} file${stats.files === 1 ? '' : 's'} · ${stats.dirs} director${stats.dirs === 1 ? 'y' : 'ies'}`;
           }
         })
         .catch((err) => {
@@ -423,14 +482,12 @@
         });
     }
 
-    // Initialize file tree
     (function () {
       treeState.pane = document.getElementById('file-tree');
       treeState.paneShell = document.getElementById('file-tree-pane');
       const toggle = document.getElementById('file-tree-toggle');
       treeState.statsPane = document.getElementById('file-stats');
       if (!treeState.pane) return;
-      // thread_filetree
       treeState.fileTreeUrl = new URL('{% url "ctf:thread_filetree" thread.uuid %}', window.location.origin);
 
       if (toggle && treeState.paneShell) {
@@ -438,7 +495,7 @@
           const collapsed = treeState.paneShell.getAttribute('data-collapsed') === 'true';
           const nextCollapsed = !collapsed;
           treeState.paneShell.setAttribute('data-collapsed', String(nextCollapsed));
-          toggle.textContent = nextCollapsed ? '▲' : '▼';
+          toggle.textContent = nextCollapsed ? '▸' : '▾';
           toggle.setAttribute('aria-expanded', String(!nextCollapsed));
           toggle.setAttribute('aria-label', nextCollapsed ? 'Expand file tree' : 'Collapse file tree');
         });
@@ -446,6 +503,8 @@
 
       refreshFileTree();
     })();
+
+    // ===== Timeline + SSE =====
     (function () {
       const timeline = document.getElementById("timeline");
       const eventCount = document.getElementById("event-count");
@@ -595,7 +654,7 @@
           const costValue = Number(ev.cost_usd);
           stats.push({
             label: "cost",
-            value: Number.isFinite(costValue) ? `$${costValue.toFixed(6)}` : `$${ev.cost_usd}`,
+            value: Number.isFinite(costValue) ? `$${costValue.toFixed(4)}` : `$${ev.cost_usd}`,
           });
         }
         return { stats: stats.length ? stats : null };
@@ -829,11 +888,15 @@
       }
 
       function applyStatusClass(status) {
-        statusLabel.classList.remove(
-          "status-completed", "status-failed", "status-running",
-          "status-queued", "status-pending", "status-waiting", "status-stopped"
-        );
-        statusLabel.classList.add("status-" + (status || "pending"));
+        const all = [
+          "pill-completed", "pill-failed", "pill-running",
+          "pill-queued", "pill-pending", "pill-waiting", "pill-stopped",
+        ];
+        for (const c of all) statusLabel.classList.remove(c);
+        // Fold "stopped" → "completed" for display only.
+        let folded = status || "pending";
+        if (folded === "stopped") folded = "completed";
+        statusLabel.classList.add("pill-" + folded);
       }
       function applyPromptAvailability(status) {
         if (!steerForm) return;
@@ -861,10 +924,12 @@
 
       sse.addEventListener("status", (message) => {
         const payload = JSON.parse(message.data);
-        statusNode.textContent = payload.status;
-        applyStatusClass(payload.status);
-        applyPromptAvailability(payload.status);
-        if (!promptableStatuses.has(payload.status || "")) {
+        const raw = payload.status;
+        const display = raw === "stopped" ? "completed" : raw;
+        statusNode.textContent = display;
+        applyStatusClass(raw);
+        applyPromptAvailability(raw);
+        if (!promptableStatuses.has(raw || "")) {
           sse.close();
         }
       });

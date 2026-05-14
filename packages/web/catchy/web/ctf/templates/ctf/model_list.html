@@ -11,34 +11,42 @@
 
   <div class="page-head">
     <div class="title">
-      <h1 class="display reveal" style="margin: 0;">Models.</h1>
-      <p class="lead reveal" style="margin: 20px 0 0;">
-        Model names available for agent runs.
-      </p>
+      <h1 class="h-page reveal">Models.</h1>
+      <p class="lead reveal mt-3">Model names available for agent runs.</p>
     </div>
     <div class="actions">
       <a class="btn btn-primary" href="{% url 'ctf:model_create' %}">New model</a>
     </div>
   </div>
 
-  <section class="reveal">
-    <div class="section-head">
-      <h2>Index</h2>
-      <span class="meta">{{ models|length }} model{{ models|length|pluralize }}</span>
-    </div>
-    <ul class="idx-list">
-      {% for model in models %}
-        <li class="idx-row" onclick="window.location='{% url 'ctf:model_update' slug=model.slug %}'">
-          <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
-          <div class="idx-title">
-            <a href="{% url 'ctf:model_update' slug=model.slug %}" class="mono" style="font-size: 17px; color: var(--ink);">{{ model.name }}</a>
-            <span class="idx-desc"><span class="mono muted">/{{ model.slug }}</span></span>
-          </div>
-          <span class="idx-meta"></span>
-        </li>
-      {% empty %}
-        <li><div class="empty">No models yet.</div></li>
-      {% endfor %}
-    </ul>
-  </section>
+  <p class="muted small mb-5">
+    {{ list_stats.count|default:0 }} model{{ list_stats.count|default:0|pluralize }}
+    <span class="mute2"> · </span>
+    {{ list_stats.priced|default:0 }} priced
+    <span class="mute2"> · </span>
+    {{ list_stats.thread_total|default:0 }} thread{{ list_stats.thread_total|default:0|pluralize }} total
+  </p>
+
+  <ul class="idx-list reveal">
+    {% for model in models %}
+      <li class="idx-row mono-title">
+        <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
+        <div class="idx-title">
+          <a class="idx-link" href="{% url 'ctf:model_update' slug=model.slug %}">{{ model.name }}</a>
+          <span class="idx-desc"><span class="mono muted">/{{ model.slug }}</span></span>
+        </div>
+        <span class="idx-meta">
+          <span class="mono muted num">{{ model.thread_count|default:0 }} thread{{ model.thread_count|default:0|pluralize }}</span>
+          {% if not model.pricing_count %}<span class="mono muted">unpriced</span>{% endif %}
+        </span>
+      </li>
+    {% empty %}
+      <li>
+        <div class="empty">
+          No models yet.
+          <a class="btn btn-sm btn-primary empty-cta" href="{% url 'ctf:model_create' %}">Add a model</a>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
 {% endblock %}

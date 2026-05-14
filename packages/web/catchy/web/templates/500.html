@@ -5,33 +5,18 @@
 {% block content %}
   <section class="error-hero">
     <div class="reveal">
-      <span class="mono muted error-code">500</span>
-      <h1 class="display" style="margin: 12px 0 0;">
+      <span class="error-code">500</span>
+      <h1 class="display">
         Something <em>broke</em>.
       </h1>
-      <p class="lead" style="margin: 24px 0 0;">
+      <p class="lead">
         We hit an unexpected error on our side. The team has been notified.
         Give it a moment and try again.
       </p>
-      <div class="row" style="margin-top: 32px;">
+      <div class="row">
         <a class="btn btn-primary" href="{% url 'ctf:index' %}">Back to home</a>
-        <a class="btn btn-bare" href="javascript:location.reload()">↻ Reload</a>
+        <a class="btn-bare" href="javascript:location.reload()">↻ Reload</a>
       </div>
     </div>
   </section>
-
-  <style>
-    .error-hero {
-      padding: 96px 0 48px;
-      max-width: 640px;
-    }
-    .error-code {
-      font-size: 13px;
-      letter-spacing: 0.18em;
-      text-transform: uppercase;
-    }
-    @media (max-width: 720px) {
-      .error-hero { padding-top: 56px; }
-    }
-  </style>
 {% endblock %}

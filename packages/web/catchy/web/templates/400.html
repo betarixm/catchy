@@ -5,33 +5,18 @@
 {% block content %}
   <section class="error-hero">
     <div class="reveal">
-      <span class="mono muted error-code">400</span>
-      <h1 class="display" style="margin: 12px 0 0;">
+      <span class="error-code">400</span>
+      <h1 class="display">
         Bad <em>request</em>.
       </h1>
-      <p class="lead" style="margin: 24px 0 0;">
+      <p class="lead">
         Something about that request didn't parse. If you typed it by hand, double-check.
         Otherwise, try again from a known-good page.
       </p>
-      <div class="row" style="margin-top: 32px;">
+      <div class="row">
         <a class="btn btn-primary" href="{% url 'ctf:index' %}">Back to home</a>
-        <a class="btn btn-bare" href="javascript:history.back()">← Go back</a>
+        <a class="btn-bare" href="javascript:history.back()">← Go back</a>
       </div>
     </div>
   </section>
-
-  <style>
-    .error-hero {
-      padding: 96px 0 48px;
-      max-width: 640px;
-    }
-    .error-code {
-      font-size: 13px;
-      letter-spacing: 0.18em;
-      text-transform: uppercase;
-    }
-    @media (max-width: 720px) {
-      .error-hero { padding-top: 56px; }
-    }
-  </style>
 {% endblock %}

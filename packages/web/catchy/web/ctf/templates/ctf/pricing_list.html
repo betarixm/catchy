@@ -11,36 +11,46 @@
 
   <div class="page-head">
     <div class="title">
-      <h1 class="display reveal" style="margin: 0;">Pricing.</h1>
-      <p class="lead reveal" style="margin: 20px 0 0;">
-        Token pricing by provider and model.
-      </p>
+      <h1 class="h-page reveal">Pricing.</h1>
+      <p class="lead reveal mt-3">Token pricing by provider and model.</p>
     </div>
     <div class="actions">
       <a class="btn btn-primary" href="{% url 'ctf:pricing_create' %}">New pricing</a>
     </div>
   </div>
 
-  <section class="reveal">
-    <div class="section-head">
-      <h2>Index</h2>
-      <span class="meta">{{ pricing|length }} entr{{ pricing|length|pluralize:"y,ies" }}</span>
-    </div>
-    <ul class="idx-list">
-      {% for item in pricing %}
-        <li class="idx-row" onclick="window.location='{% url 'ctf:pricing_update' pk=item.pk %}'">
-          <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
-          <div class="idx-title">
-            <a href="{% url 'ctf:pricing_update' pk=item.pk %}" class="mono" style="font-size: 17px; color: var(--ink);">{{ item.provider.slug }} / {{ item.model.name }}</a>
-            <span class="idx-desc">
-              input ${{ item.input_per_million }} · cached ${{ item.cached_input_per_million }} · output ${{ item.output_per_million }} / 1M
-            </span>
-          </div>
-          <span class="idx-meta"></span>
-        </li>
-      {% empty %}
-        <li><div class="empty">No pricing entries yet.</div></li>
-      {% endfor %}
-    </ul>
-  </section>
+  <p class="muted small mb-5">
+    {{ list_stats.count|default:0 }} entr{{ list_stats.count|default:0|pluralize:"y,ies" }}
+    <span class="mute2"> · </span>
+    {{ list_stats.providers|default:0 }} provider{{ list_stats.providers|default:0|pluralize }}
+    <span class="mute2"> · </span>
+    {{ list_stats.models|default:0 }} model{{ list_stats.models|default:0|pluralize }}
+  </p>
+
+  <ul class="idx-list reveal">
+    {% for item in pricing %}
+      <li class="idx-row mono-title">
+        <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
+        <div class="idx-title">
+          <a class="idx-link" href="{% url 'ctf:pricing_update' pk=item.pk %}">{{ item.provider.slug }} / {{ item.model.name }}</a>
+          <span class="idx-desc num">
+            input <strong>${{ item.input_per_million|floatformat:2 }}</strong>
+            <span class="muted">·</span>
+            cached <strong>${{ item.cached_input_per_million|floatformat:2 }}</strong>
+            <span class="muted">·</span>
+            output <strong>${{ item.output_per_million|floatformat:2 }}</strong>
+            <span class="muted xsmall"> / 1M</span>
+          </span>
+        </div>
+        <span class="idx-meta"></span>
+      </li>
+    {% empty %}
+      <li>
+        <div class="empty">
+          No pricing entries yet.
+          <a class="btn btn-sm btn-primary empty-cta" href="{% url 'ctf:pricing_create' %}">Add pricing</a>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
 {% endblock %}

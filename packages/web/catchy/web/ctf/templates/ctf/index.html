@@ -1,32 +1,66 @@
 {% extends "base.html" %}
+{% load ctf_form %}
 
 {% block content %}
   {% if user.is_authenticated %}
-    {# ===== AUTH'D DASHBOARD ===== #}
-    <section class="hero" style="padding: 56px 0 32px;">
-      <h1 class="display reveal" style="margin: 0;">
-        Hi, <em>{{ user.username|default:"operator" }}</em>.
-      </h1>
-      <p class="lead reveal" style="margin: 24px 0 0;">
-        Your workbench, ready when you are.
-      </p>
-      <div class="row reveal" style="margin-top: 28px;">
+    {# ===== Authenticated workbench ===== #}
+    <section class="page-head" style="padding-top: 56px; border-bottom: 0;">
+      <div class="title">
+        <h1 class="display reveal">
+          Hi, <em>{{ user.username|default:"operator" }}</em>.
+        </h1>
+        <p class="lead reveal mt-3">
+          Your CTFs, agents, and threads — all in one quiet room.
+        </p>
+      </div>
+      <div class="actions">
         <a class="btn btn-primary" href="{% url 'ctf:ctf_create' %}">New CTF</a>
-        <a class="btn" href="{% url 'ctf:agent_list' %}">Manage agents</a>
+        <a class="btn btn-ghost" href="{% url 'ctf:agent_list' %}">Agents</a>
       </div>
     </section>
+
+    <section class="stats reveal" aria-label="Overview">
+      <div class="stat">
+        <div class="stat-label">CTFs</div>
+        <div class="stat-value num">{{ ctfs|length }}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Recent threads</div>
+        <div class="stat-value num">{{ threads|length }}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Public runs</div>
+        <div class="stat-value num">{{ public_thread_count|default:0 }}</div>
+      </div>
+      {% if thread_stats.total_cost is not None %}
+        <div class="stat">
+          <div class="stat-label">Total cost</div>
+          <div class="stat-value small-num num">${{ thread_stats.total_cost|floatformat:4 }}</div>
+        </div>
+      {% endif %}
+    </section>
+
+    {% if thread_stats.total %}
+      <section class="reveal mb-5">
+        <div class="breakdown-grid">
+          {% include "ctf/_breakdown.html" with title="By CTF" rows=thread_stats.by_ctf total=thread_stats.total %}
+          {% include "ctf/_breakdown.html" with title="By agent" rows=thread_stats.by_agent total=thread_stats.total %}
+          {% include "ctf/_breakdown.html" with title="By model" rows=thread_stats.by_model total=thread_stats.total label_class="mono" %}
+        </div>
+      </section>
+    {% endif %}
 
     <section class="section reveal">
       <div class="section-head">
         <h2>CTFs</h2>
-        <span class="meta">{{ ctfs|length }} item{{ ctfs|length|pluralize }}</span>
+        <a class="meta" href="{% url 'ctf:ctf_create' %}">+ new</a>
       </div>
       <ul class="idx-list">
         {% for ctf in ctfs %}
-          <li class="idx-row" onclick="window.location='{{ ctf.get_absolute_url }}'">
+          <li class="idx-row">
             <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
             <div class="idx-title">
-              <a href="{{ ctf.get_absolute_url }}">{{ ctf.title }}</a>
+              <a class="idx-link" href="{{ ctf.get_absolute_url }}">{{ ctf.title }}</a>
               {% if ctf.description %}
                 <span class="idx-desc">{{ ctf.description|striptags|truncatechars:160 }}</span>
               {% endif %}
@@ -34,10 +68,14 @@
             <span class="idx-meta">
               <span class="mono muted">/{{ ctf.slug }}</span>
             </span>
-            
           </li>
         {% empty %}
-          <li><div class="empty">No CTFs yet. Create one to get started.</div></li>
+          <li>
+            <div class="empty">
+              No CTFs yet.
+              <a class="btn btn-sm btn-primary empty-cta" href="{% url 'ctf:ctf_create' %}">Create your first CTF</a>
+            </div>
+          </li>
         {% endfor %}
       </ul>
     </section>
@@ -49,20 +87,20 @@
       </div>
       <ul class="idx-list">
         {% for thread in threads %}
-          <li class="idx-row" onclick="window.location='{{ thread.get_absolute_url }}'">
+          <li class="idx-row">
             <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
             <div class="idx-title">
-              <a href="{{ thread.get_absolute_url }}">{{ thread }}</a>
+              <a class="idx-link" href="{{ thread.get_absolute_url }}">{{ thread }}</a>
               <span class="idx-desc">
-                {{ thread.ctf.title }}{% if thread.agent %} · <span class="mono muted">{{ thread.agent.name }}</span>{% endif %}
+                {{ thread.ctf.title }}
+                {% if thread.agent %} <span class="muted">·</span> <span class="mono muted">{{ thread.agent.name }}</span>{% endif %}
               </span>
             </div>
             <span class="idx-meta">
-              {% if thread.latest_cost_usd != None %}<span class="mono muted">${{ thread.latest_cost_usd }}</span>{% endif %}
-              <span class="status status-{{ thread.status }}">{{ thread.status }}</span>
-              {% if thread.is_public %}<span class="status status-public">public</span>{% endif %}
+              {% if thread.latest_cost_usd != None %}<span class="mono muted num">${{ thread.latest_cost_usd|floatformat:4 }}</span>{% endif %}
+              <span class="pill pill-{{ thread.status|display_status }}">{{ thread.status|display_status }}</span>
+              {% if thread.is_public %}<span class="pill pill-public">public</span>{% endif %}
             </span>
-            
           </li>
         {% empty %}
           <li><div class="empty">No threads yet.</div></li>
@@ -70,40 +108,50 @@
       </ul>
     </section>
   {% else %}
-    {# ===== PUBLIC LANDING — threads-first ===== #}
+    {# ===== Public landing — per-CTF groups, no hero ===== #}
     <section id="public-threads" aria-label="Public threads" style="padding-top: 32px;">
       {% for group in public_thread_groups %}
-        <div class="reveal" style="margin-bottom: 56px;">
-          <div class="between" style="padding-bottom: 12px; margin-bottom: 0; border-bottom: 1px solid var(--ink);">
-            <h3 class="h-section" style="font-size: clamp(22px, 2.8vw, 30px);">{{ group.ctf.title }}</h3>
-            <div class="muted" style="font-size: 13px;">
+        <div class="reveal mb-6">
+          <div class="between" style="padding: 14px 0; border-bottom: 1px solid var(--ink);">
+            <h3 class="h-section">{{ group.ctf.title }}</h3>
+            <div class="muted small">
               {{ group.challenges|length }} challenge{{ group.challenges|length|pluralize }}
-              · {{ group.thread_count }} run{{ group.thread_count|pluralize }}
+              <span class="mute2"> · </span>
+              {{ group.thread_count }} run{{ group.thread_count|pluralize }}
             </div>
           </div>
 
+          {% if group.stats.total %}
+            {% include "ctf/_stats_overview.html" with stats=group.stats %}
+            <div class="breakdown-grid mb-3">
+              {% include "ctf/_breakdown.html" with title="By challenge" rows=group.stats.by_challenge total=group.stats.total label_class="mono" %}
+              {% include "ctf/_breakdown.html" with title="By agent" rows=group.stats.by_agent total=group.stats.total %}
+              {% include "ctf/_breakdown.html" with title="By model" rows=group.stats.by_model total=group.stats.total label_class="mono" %}
+            </div>
+          {% endif %}
+
           {% for ch in group.challenges %}
-            <div style="margin-top: 28px;">
-              <div class="between" style="padding-bottom: 8px; margin-bottom: 0; border-bottom: 1px solid var(--rule-soft);">
-                <div class="row" style="gap: 14px; align-items: baseline;">
-                  <span class="mono muted" style="font-size: 12px;">{{ forloop.counter|stringformat:"02d" }}</span>
+            <div class="mt-4">
+              <div class="between" style="padding: 10px 0; border-bottom: 1px solid var(--rule-soft);">
+                <div class="row gap-2" style="align-items: baseline;">
+                  <span class="mono muted xsmall num">{{ forloop.counter|stringformat:"02d" }}</span>
                   <span style="font-family: var(--serif); font-size: 18px; letter-spacing: -0.01em;">{{ ch.challenge.challenge_id }}</span>
                 </div>
-                <span class="muted" style="font-size: 12px;">{{ ch.threads|length }} run{{ ch.threads|length|pluralize }}</span>
+                <span class="muted xsmall">{{ ch.threads|length }} run{{ ch.threads|length|pluralize }}</span>
               </div>
               <ul class="idx-list" style="border-top: 0;">
                 {% for thread in ch.threads %}
-                  <li class="idx-row" onclick="window.location='{{ thread.get_absolute_url }}'">
+                  <li class="idx-row">
                     <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
                     <div class="idx-title">
-                      <a href="{{ thread.get_absolute_url }}">{{ thread }}</a>
+                      <a class="idx-link" href="{{ thread.get_absolute_url }}">{{ thread }}</a>
                       {% if thread.agent %}
                         <span class="idx-desc"><span class="mono muted">{{ thread.agent.name }}</span></span>
                       {% endif %}
                     </div>
                     <span class="idx-meta">
-                      {% if thread.latest_cost_usd != None %}<span class="mono muted">${{ thread.latest_cost_usd }}</span>{% endif %}
-                      <span class="status status-{{ thread.status }}">{{ thread.status }}</span>
+                      {% if thread.latest_cost_usd != None %}<span class="mono muted num">${{ thread.latest_cost_usd|floatformat:4 }}</span>{% endif %}
+                      <span class="pill pill-{{ thread.status|display_status }}">{{ thread.status|display_status }}</span>
                     </span>
                   </li>
                 {% endfor %}
@@ -115,20 +163,5 @@
         <div class="empty">No public threads yet.</div>
       {% endfor %}
     </section>
-
-    <style>
-      .public-intro {
-        display: flex;
-        align-items: end;
-        justify-content: space-between;
-        gap: 24px;
-        padding: 40px 0 28px;
-        margin-bottom: 32px;
-        border-bottom: 1px solid var(--ink);
-      }
-      @media (max-width: 600px) {
-        .public-intro { flex-direction: column; align-items: stretch; }
-      }
-    </style>
   {% endif %}
 {% endblock %}

@@ -5,35 +5,20 @@
 {% block content %}
   <section class="error-hero">
     <div class="reveal">
-      <span class="mono muted error-code">404</span>
-      <h1 class="display" style="margin: 12px 0 0;">
+      <span class="error-code">404</span>
+      <h1 class="display">
         Not <em>found</em>.
       </h1>
-      <p class="lead" style="margin: 24px 0 0;">
+      <p class="lead">
         This page doesn't exist — or it never did.
         {% if request_path %}
           The path <code>{{ request_path }}</code> didn't match anything we know about.
         {% endif %}
       </p>
-      <div class="row" style="margin-top: 32px;">
+      <div class="row">
         <a class="btn btn-primary" href="{% url 'ctf:index' %}">Back to home</a>
-        <a class="btn btn-bare" href="javascript:history.back()">← Go back</a>
+        <a class="btn-bare" href="javascript:history.back()">← Go back</a>
       </div>
     </div>
   </section>
-
-  <style>
-    .error-hero {
-      padding: 96px 0 48px;
-      max-width: 640px;
-    }
-    .error-code {
-      font-size: 13px;
-      letter-spacing: 0.18em;
-      text-transform: uppercase;
-    }
-    @media (max-width: 720px) {
-      .error-hero { padding-top: 56px; }
-    }
-  </style>
 {% endblock %}

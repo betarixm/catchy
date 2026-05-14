@@ -5,37 +5,22 @@
 {% block content %}
   <section class="error-hero">
     <div class="reveal">
-      <span class="mono muted error-code">403</span>
-      <h1 class="display" style="margin: 12px 0 0;">
+      <span class="error-code">403</span>
+      <h1 class="display">
         Not <em>yours</em>.
       </h1>
-      <p class="lead" style="margin: 24px 0 0;">
+      <p class="lead">
         You don't have access to this corner of Catchy.
         {% if not user.is_authenticated %}
           Try signing in if this looks wrong.
         {% endif %}
       </p>
-      <div class="row" style="margin-top: 32px;">
+      <div class="row">
         <a class="btn btn-primary" href="{% url 'ctf:index' %}">Back to home</a>
         {% if not user.is_authenticated %}
-          <a class="btn" href="{% url 'login' %}">Sign in</a>
+          <a class="btn btn-ghost" href="{% url 'login' %}">Sign in</a>
         {% endif %}
       </div>
     </div>
   </section>
-
-  <style>
-    .error-hero {
-      padding: 96px 0 48px;
-      max-width: 640px;
-    }
-    .error-code {
-      font-size: 13px;
-      letter-spacing: 0.18em;
-      text-transform: uppercase;
-    }
-    @media (max-width: 720px) {
-      .error-hero { padding-top: 56px; }
-    }
-  </style>
 {% endblock %}

@@ -1,0 +1,28 @@
+{% comment %}
+Aggregate strip — counts by status + total cost.
+Vars: stats (dict from _thread_stats)
+{% endcomment %}
+<section class="stats" aria-label="Thread overview">
+  <div class="stat">
+    <div class="stat-label">Threads</div>
+    <div class="stat-value num">{{ stats.total }}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Completed</div>
+    <div class="stat-value num" style="color: var(--ok);">{{ stats.completed }}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Active</div>
+    <div class="stat-value num">{{ stats.running|add:stats.queued|add:stats.waiting }}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Failed</div>
+    <div class="stat-value num" style="color: var(--err);">{{ stats.failed }}</div>
+  </div>
+  {% if stats.total_cost is not None %}
+    <div class="stat">
+      <div class="stat-label">Cost</div>
+      <div class="stat-value small-num num">${{ stats.total_cost|floatformat:4 }}</div>
+    </div>
+  {% endif %}
+</section>

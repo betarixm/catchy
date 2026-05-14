@@ -3,6 +3,8 @@
 
 {% block title %}{{ title }} — Catchy{% endblock %}
 
+{% block container_class %}container-narrow{% endblock %}
+
 {% block content %}
   <div class="crumbs reveal">
     <a href="{% url 'ctf:index' %}">Index</a>
@@ -10,70 +12,46 @@
     <span class="now">{{ title }}</span>
   </div>
 
-  <div class="container-narrow" style="padding: 0;">
-    <div class="page-head" style="grid-template-columns: 1fr;">
-      <div class="title">
-        <h1 class="display reveal" style="margin: 0; font-size: clamp(36px, 5vw, 64px);">
-          {{ title }}
-        </h1>
-      </div>
+  <div class="page-head" style="grid-template-columns: 1fr;">
+    <div class="title">
+      <h1 class="h-page reveal mt-2">{{ title }}</h1>
     </div>
-
-    <form method="post" enctype="multipart/form-data" class="editorial reveal">
-      {% csrf_token %}
-
-      {% if form.non_field_errors %}
-        <ul class="errorlist" style="margin-bottom: 16px;">
-          {% for error in form.non_field_errors %}<li>{{ error }}</li>{% endfor %}
-        </ul>
-      {% endif %}
-
-      {% if form.fieldsets %}
-        {% for label, names in form.fieldsets %}
-          <fieldset class="form-fieldset">
-            <legend>{{ label }}</legend>
-            {% for name in names %}
-              {% with field=form|getfield:name %}
-                {% if field %}
-                  <p>
-                    {{ field.label_tag }}
-                    {{ field }}
-                    {% if field.help_text %}<span class="helptext">{{ field.help_text|safe }}</span>{% endif %}
-                    {% if field.errors %}<ul class="errorlist">{% for e in field.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
-                  </p>
-                {% endif %}
-              {% endwith %}
-            {% endfor %}
-          </fieldset>
-        {% endfor %}
-      {% else %}
-        {{ form.as_p }}
-      {% endif %}
-
-      <div class="row" style="margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--rule-soft);">
-        <button type="submit" class="btn btn-primary">Save</button>
-        <a href="javascript:history.back()" class="btn-bare">← Cancel</a>
-      </div>
-    </form>
   </div>
 
-  <style>
-    .form-fieldset {
-      border: 0;
-      padding: 24px 0;
-      margin: 0;
-      border-top: 1px solid var(--rule-soft);
-    }
-    .form-fieldset:first-of-type { border-top: 0; padding-top: 8px; }
-    .form-fieldset > legend {
-      font-family: var(--mono);
-      font-size: 11px;
-      font-weight: 500;
-      letter-spacing: 0.16em;
-      text-transform: uppercase;
-      color: var(--muted);
-      padding: 0;
-      margin-bottom: 16px;
-    }
-  </style>
+  <form method="post" enctype="multipart/form-data" class="editorial reveal">
+    {% csrf_token %}
+
+    {% if form.non_field_errors %}
+      <ul class="errorlist" style="margin-bottom: 16px;">
+        {% for error in form.non_field_errors %}<li>{{ error }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    {% if form.fieldsets %}
+      {% for label, names in form.fieldsets %}
+        <fieldset class="form-fieldset">
+          <legend>{{ label }}</legend>
+          {% for name in names %}
+            {% with field=form|getfield:name %}
+              {% if field %}
+                <p>
+                  {{ field.label_tag }}
+                  {{ field }}
+                  {% if field.help_text %}<span class="helptext">{{ field.help_text|safe }}</span>{% endif %}
+                  {% if field.errors %}<ul class="errorlist">{% for e in field.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+                </p>
+              {% endif %}
+            {% endwith %}
+          {% endfor %}
+        </fieldset>
+      {% endfor %}
+    {% else %}
+      {{ form.as_p }}
+    {% endif %}
+
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary">Save</button>
+      <a href="javascript:history.back()" class="btn-bare">← Cancel</a>
+    </div>
+  </form>
 {% endblock %}

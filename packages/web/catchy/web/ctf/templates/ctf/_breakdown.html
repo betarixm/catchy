@@ -1,0 +1,34 @@
+{% comment %}
+Reusable breakdown panel.
+Vars:
+  title          str        — header label (uppercase)
+  rows           list[dict] — each row: label, count, cost (or None)
+  total          int        — denominator for bars
+  label_class    str        — "mono" | "" (default sans)
+  empty_message  str        — optional empty-state message
+{% endcomment %}
+<div class="breakdown">
+  <div class="breakdown-head">
+    <span class="breakdown-title">{{ title }}</span>
+  </div>
+  {% if rows %}
+    <div class="breakdown-rows">
+      {% for row in rows %}
+        <div class="breakdown-row">
+          <span class="br-label {{ label_class|default:'' }}">{{ row.label }}</span>
+          <span class="br-count">{{ row.count }}<span class="muted"> / {{ total }}</span></span>
+          <span class="br-cost">
+            {% if row.cost is not None %}${{ row.cost|floatformat:4 }}{% else %}<span class="muted">—</span>{% endif %}
+          </span>
+          <div class="br-bar">
+            {% if total %}
+              <div class="breakdown-bar-fill" style="width: {% widthratio row.count total 100 %}%;"></div>
+            {% endif %}
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="breakdown-empty">{{ empty_message|default:"No data yet." }}</div>
+  {% endif %}
+</div>

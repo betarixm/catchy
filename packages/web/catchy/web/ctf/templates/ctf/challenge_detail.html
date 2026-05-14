@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load ctf_form %}
 
 {% block title %}{{ challenge.challenge_id }} — {{ ctf.title }}{% endblock %}
 
@@ -13,71 +14,97 @@
 
   <div class="page-head">
     <div class="title">
-      <div class="muted" style="font-size: 13px; margin-bottom: 12px;">
-        Challenge · <span class="mono">{{ challenge.challenge_id }}</span>
-      </div>
-      <h1 class="display reveal" style="margin: 0;">{{ challenge.challenge_id }}</h1>
+      <h1 class="h-page reveal">{{ challenge.challenge_id }}</h1>
       {% if challenge.webhook_summary %}
-        <div style="display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;">
-          <span class="status status-public">Notifies {{ challenge.webhook_summary.provider }}</span>
+        <div class="meta-row">
+          <span class="pill pill-public">notifies {{ challenge.webhook_summary.provider }}</span>
           {% if challenge.webhook_summary.language %}
-            <span class="status">{{ challenge.webhook_summary.language }}</span>
+            <span class="pill">{{ challenge.webhook_summary.language }}</span>
           {% endif %}
         </div>
       {% endif %}
     </div>
     <div class="actions">
       {% if can_init %}
-        <a class="btn" href="{% url 'ctf:challenge_update' ctf.slug challenge.challenge_id %}">Edit</a>
+        <a class="btn btn-ghost" href="{% url 'ctf:challenge_update' ctf.slug challenge.challenge_id %}">Edit</a>
       {% endif %}
     </div>
   </div>
 
-  <div class="grid-2 reveal" style="display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(280px, 1fr); gap: 56px; align-items: start;">
-    <div style="min-width: 0;">
+  <div class="challenge-grid reveal">
+    <div class="challenge-main">
       {% if challenge.description %}
-        <section style="margin-bottom: 56px;">
+        <section class="mb-5">
           {{ challenge.description|json_script:"challenge-description-md" }}
           <article class="prose" data-md-from="challenge-description-md"></article>
         </section>
       {% endif %}
 
       {% if challenge.config %}
-        <section style="margin-bottom: 40px;">
-          <div class="section-head" style="margin-bottom: 12px;">
-            <h2 style="font-size: clamp(20px, 2vw, 24px);">Config</h2>
-          </div>
-          <div class="panel">
-            <div class="panel-head"><span>{{ challenge.challenge_id }}.yaml</span><span class="muted">readonly</span></div>
-            <pre>{{ challenge.config }}</pre>
+        <details class="mb-5 ctf-prompt-collapsible">
+          <summary>
+            <span class="mono small">Config</span>
+            <span class="muted xsmall">{{ challenge.challenge_id }}.yaml</span>
+          </summary>
+          <pre style="margin: 0;">{{ challenge.config }}</pre>
+        </details>
+        <style>
+          .ctf-prompt-collapsible {
+            border: 1px solid var(--rule-soft);
+            background: var(--paper);
+          }
+          .ctf-prompt-collapsible > summary {
+            list-style: none;
+            cursor: pointer;
+            padding: 8px 14px;
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 14px;
+            color: var(--muted);
+          }
+          .ctf-prompt-collapsible > summary::-webkit-details-marker { display: none; }
+          .ctf-prompt-collapsible > summary:hover { background: var(--paper-2); }
+          .ctf-prompt-collapsible[open] > summary { border-bottom: 1px solid var(--rule-soft); }
+        </style>
+      {% endif %}
+
+      {% with stats=thread_stats %}
+      {% if stats.total %}
+        <section class="mb-5">
+          {% include "ctf/_stats_overview.html" with stats=stats %}
+          <div class="breakdown-grid">
+            {% include "ctf/_breakdown.html" with title="By agent" rows=stats.by_agent total=stats.total %}
+            {% include "ctf/_breakdown.html" with title="By model" rows=stats.by_model total=stats.total label_class="mono" %}
+            {% include "ctf/_breakdown.html" with title="By provider" rows=stats.by_provider total=stats.total %}
           </div>
         </section>
       {% endif %}
+      {% endwith %}
 
       <section>
-        <div class="section-head" style="margin-bottom: 16px;">
+        <div class="section-head">
           <h2>Threads</h2>
           <span class="meta">{{ threads|length }} run{{ threads|length|pluralize }}</span>
         </div>
         <ul class="idx-list">
           {% for thread in threads %}
-            <li class="idx-row" onclick="window.location='{{ thread.get_absolute_url }}'">
+            <li class="idx-row">
               <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
               <div class="idx-title">
-                <a href="{{ thread.get_absolute_url }}">{{ thread }}</a>
+                <a class="idx-link" href="{{ thread.get_absolute_url }}">{{ thread }}</a>
                 {% if thread.agent %}
                   <span class="idx-desc">
                     <span class="mono muted">{{ thread.agent.name }}</span>
-                    {% if thread.model %} · <span class="mono muted">{{ thread.model.name }}</span>{% endif %}
-                    {% if thread.can_show_credential %} · <span class="mono muted">{{ thread.credential.name }}</span>{% endif %}
+                    {% if thread.model %} <span class="muted">·</span> <span class="mono muted">{{ thread.model.name }}</span>{% endif %}
+                    {% if thread.can_show_credential %} <span class="muted">·</span> <span class="mono muted">{{ thread.credential.name }}</span>{% endif %}
                   </span>
                 {% endif %}
               </div>
               <span class="idx-meta">
-                {% if thread.latest_cost_usd != None %}<span class="mono muted">${{ thread.latest_cost_usd }}</span>{% endif %}
-                <span class="status status-{{ thread.status }}">{{ thread.status }}</span>
+                {% if thread.latest_cost_usd != None %}<span class="mono muted num">${{ thread.latest_cost_usd|floatformat:4 }}</span>{% endif %}
+                <span class="pill pill-{{ thread.status|display_status }}">{{ thread.status|display_status }}</span>
               </span>
-              
             </li>
           {% empty %}
             <li><div class="empty">No threads yet.</div></li>
@@ -87,11 +114,11 @@
     </div>
 
     {% if can_init %}
-      <aside style="min-width: 0;">
+      <aside class="challenge-side">
         <div class="panel" style="position: sticky; top: 96px;">
           <div class="panel-head">
-            <span>Start a thread</span>
-            <span class="muted">{{ challenge.challenge_id }}</span>
+            <strong>Start a thread</strong>
+            <span>{{ challenge.challenge_id }}</span>
           </div>
           <div class="panel-body">
             <form method="post"
@@ -110,11 +137,16 @@
   </div>
 
   <style>
+    .challenge-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.6fr) minmax(280px, 1fr);
+      gap: 48px;
+      align-items: start;
+    }
+    .challenge-main { min-width: 0; }
+    .challenge-side { min-width: 0; }
     @media (max-width: 980px) {
-      main.page > .container > div[class~="grid-2"] {
-        grid-template-columns: 1fr !important;
-        gap: 40px !important;
-      }
+      .challenge-grid { grid-template-columns: 1fr; gap: 32px; }
     }
   </style>
 {% endblock %}

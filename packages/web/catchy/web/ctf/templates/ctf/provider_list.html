@@ -11,34 +11,42 @@
 
   <div class="page-head">
     <div class="title">
-      <h1 class="display reveal" style="margin: 0;">Providers.</h1>
-      <p class="lead reveal" style="margin: 20px 0 0;">
-        Provider identifiers used by credentials and pricing.
-      </p>
+      <h1 class="h-page reveal">Providers.</h1>
+      <p class="lead reveal mt-3">Provider identifiers used by credentials and pricing.</p>
     </div>
     <div class="actions">
       <a class="btn btn-primary" href="{% url 'ctf:provider_create' %}">New provider</a>
     </div>
   </div>
 
-  <section class="reveal">
-    <div class="section-head">
-      <h2>Index</h2>
-      <span class="meta">{{ providers|length }} provider{{ providers|length|pluralize }}</span>
-    </div>
-    <ul class="idx-list">
-      {% for provider in providers %}
-        <li class="idx-row" onclick="window.location='{% url 'ctf:provider_update' slug=provider.slug %}'">
-          <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
-          <div class="idx-title">
-            <a href="{% url 'ctf:provider_update' slug=provider.slug %}" class="mono" style="font-size: 17px; color: var(--ink);">{{ provider.name }}</a>
-            <span class="idx-desc"><span class="mono muted">/{{ provider.slug }}</span></span>
-          </div>
-          <span class="idx-meta"></span>
-        </li>
-      {% empty %}
-        <li><div class="empty">No providers yet.</div></li>
-      {% endfor %}
-    </ul>
-  </section>
+  <p class="muted small mb-5">
+    {{ list_stats.count|default:0 }} provider{{ list_stats.count|default:0|pluralize }}
+    <span class="mute2"> · </span>
+    {{ list_stats.credentials_total|default:0 }} credential{{ list_stats.credentials_total|default:0|pluralize }}
+    <span class="mute2"> · </span>
+    {{ list_stats.pricing_total|default:0 }} pricing entr{{ list_stats.pricing_total|default:0|pluralize:"y,ies" }}
+  </p>
+
+  <ul class="idx-list reveal">
+    {% for provider in providers %}
+      <li class="idx-row mono-title">
+        <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
+        <div class="idx-title">
+          <a class="idx-link" href="{% url 'ctf:provider_update' slug=provider.slug %}">{{ provider.name }}</a>
+          <span class="idx-desc"><span class="mono muted">/{{ provider.slug }}</span></span>
+        </div>
+        <span class="idx-meta">
+          <span class="mono muted num">{{ provider.credential_count|default:0 }} cred{{ provider.credential_count|default:0|pluralize }}</span>
+          <span class="mono muted num">{{ provider.pricing_count|default:0 }} price</span>
+        </span>
+      </li>
+    {% empty %}
+      <li>
+        <div class="empty">
+          No providers yet.
+          <a class="btn btn-sm btn-primary empty-cta" href="{% url 'ctf:provider_create' %}">Add a provider</a>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
 {% endblock %}

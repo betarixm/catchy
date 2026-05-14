@@ -13,30 +13,38 @@
 
   <div class="page-head">
     <div class="title">
-      <h1 class="display reveal" style="margin: 0;">{{ agent.name }}</h1>
-      <div class="row" style="margin-top: 18px;">
+      <h1 class="h-page reveal">{{ agent.name }}</h1>
+      <div class="meta-row">
         {% if resolves %}
-          <span class="status status-completed">resolver ok</span>
+          <span class="pill pill-completed">resolver ok</span>
         {% else %}
-          <span class="status status-failed">resolver failed</span>
+          <span class="pill pill-failed">resolver failed</span>
         {% endif %}
-        <span class="muted" style="font-size: 13px;">/{{ agent.slug }}</span>
       </div>
     </div>
     <div class="actions">
-      <a class="btn" href="{% url 'ctf:agent_update' agent.slug %}">Edit YAML</a>
+      <a class="btn btn-ghost" href="{% url 'ctf:agent_update' agent.slug %}">Edit YAML</a>
     </div>
   </div>
 
+  {% with stats=thread_stats %}
+  {% if stats.total %}
+    <section class="reveal mb-5">
+      {% include "ctf/_stats_overview.html" with stats=stats %}
+      <div class="breakdown-grid">
+        {% include "ctf/_breakdown.html" with title="By CTF" rows=stats.by_ctf total=stats.total %}
+        {% include "ctf/_breakdown.html" with title="By challenge" rows=stats.by_challenge total=stats.total label_class="mono" %}
+        {% include "ctf/_breakdown.html" with title="By model" rows=stats.by_model total=stats.total label_class="mono" %}
+      </div>
+    </section>
+  {% endif %}
+  {% endwith %}
+
   <section class="reveal">
-    <div class="section-head" style="margin-bottom: 16px;">
-      <h2>Stored YAML</h2>
-      <span class="meta">readonly</span>
-    </div>
     <div class="panel">
       <div class="panel-head">
-        <span>{{ agent.slug }}.yaml</span>
-        <span class="muted">stored</span>
+        <strong>{{ agent.slug }}.yaml</strong>
+        <span>stored</span>
       </div>
       <pre>{{ agent.yaml }}</pre>
     </div>

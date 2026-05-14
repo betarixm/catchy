@@ -11,35 +11,41 @@
 
   <div class="page-head">
     <div class="title">
-      <h1 class="display reveal" style="margin: 0;">Agents.</h1>
-      <p class="lead reveal" style="margin: 20px 0 0;">
-        Configurations for the agents you run.
-      </p>
+      <h1 class="h-page reveal">Agents.</h1>
+      <p class="lead reveal mt-3">Stored YAML configurations for the agents you run.</p>
     </div>
     <div class="actions">
       <a class="btn btn-primary" href="{% url 'ctf:agent_create' %}">New agent</a>
     </div>
   </div>
 
-  <section class="reveal">
-    <div class="section-head">
-      <h2>Index</h2>
-      <span class="meta">{{ agents|length }} agent{{ agents|length|pluralize }}</span>
-    </div>
-    <ul class="idx-list">
-      {% for agent in agents %}
-        <li class="idx-row" onclick="window.location='{{ agent.get_absolute_url }}'">
-          <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
-          <div class="idx-title">
-            <a href="{{ agent.get_absolute_url }}">{{ agent.name }}</a>
-            <span class="idx-desc"><span class="mono muted">/{{ agent.slug }}</span></span>
-          </div>
-          <span class="idx-meta"></span>
-          
-        </li>
-      {% empty %}
-        <li><div class="empty">No agents yet.</div></li>
-      {% endfor %}
-    </ul>
-  </section>
+  <p class="muted small mb-5">
+    {{ list_stats.count|default:0 }} agent{{ list_stats.count|default:0|pluralize }}
+    <span class="mute2"> · </span>
+    {{ list_stats.active|default:0 }} in use
+    <span class="mute2"> · </span>
+    {{ list_stats.thread_total|default:0 }} thread{{ list_stats.thread_total|default:0|pluralize }} total
+  </p>
+
+  <ul class="idx-list reveal">
+    {% for agent in agents %}
+      <li class="idx-row">
+        <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
+        <div class="idx-title">
+          <a class="idx-link" href="{{ agent.get_absolute_url }}">{{ agent.name }}</a>
+          <span class="idx-desc"><span class="mono muted">/{{ agent.slug }}</span></span>
+        </div>
+        <span class="idx-meta">
+          <span class="mono muted num">{{ agent.thread_count|default:0 }} thread{{ agent.thread_count|default:0|pluralize }}</span>
+        </span>
+      </li>
+    {% empty %}
+      <li>
+        <div class="empty">
+          No agents yet.
+          <a class="btn btn-sm btn-primary empty-cta" href="{% url 'ctf:agent_create' %}">Define your first agent</a>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
 {% endblock %}
