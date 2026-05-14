@@ -33,6 +33,16 @@
     </section>
   {% endif %}
 
+  {% if ctf.prompt %}
+    <section class="reveal" style="margin-bottom: 56px;">
+      <div class="section-head" style="margin-bottom: 12px;">
+        <h2 style="font-size: clamp(20px, 2vw, 24px);">Prompt</h2>
+      </div>
+      {{ ctf.prompt|json_script:"ctf-prompt-md" }}
+      <article class="prose" data-md-from="ctf-prompt-md"></article>
+    </section>
+  {% endif %}
+
   <section class="reveal">
     <div class="section-head">
       <h2>Challenges</h2>

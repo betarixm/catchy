@@ -218,7 +218,20 @@ class CtfForm(forms.ModelForm):
 
     class Meta:
         model = Ctf
-        fields = ["title", "slug", "description", "view_groups", "init_groups"]
+        fields = [
+            "title",
+            "slug",
+            "description",
+            "prompt",
+            "view_groups",
+            "init_groups",
+        ]
+        help_texts = {
+            "prompt": "Optional prompt appended to the initial agent prompt for this CTF.",
+        }
+        widgets = {
+            "prompt": forms.Textarea(attrs={"rows": 8, "cols": 80}),
+        }
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)

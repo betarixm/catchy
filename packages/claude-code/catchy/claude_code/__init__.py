@@ -361,6 +361,7 @@ class ClaudeCodeAgent(Agent[Message]):
         workspace_directory: Path,
         metadata_directory: Path,
         webhook: Webhook | None = None,
+        additional_prompt: str | None = None,
     ) -> AsyncGenerator[Event[Message], Interrupt]:
         if not workspace_directory.exists():
             raise ValueError(f"workspace does not exist: {workspace_directory}")
@@ -382,6 +383,11 @@ class ClaudeCodeAgent(Agent[Message]):
             challenge=challenge,
             webhook=webhook,
         )
+        stripped_additional_prompt = (
+            additional_prompt.strip() if additional_prompt is not None else ""
+        )
+        if stripped_additional_prompt:
+            next_prompt = f"{next_prompt}\n\n{stripped_additional_prompt}"
 
         with self._docker_container(
             challenge=challenge,

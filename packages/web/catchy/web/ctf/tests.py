@@ -35,6 +35,7 @@ from catchy.web.ctf import services, views
 from catchy.web.ctf.forms import (
     ChallengeForm,
     CredentialForm,
+    CtfForm,
     ModelConfigurationForm,
     ModelPricingForm,
     ProviderForm,
@@ -268,6 +269,21 @@ class CredentialAgentPermissionTests(TestCase):
         form = ProviderForm({"name": "OpenRouter", "slug": "openrouter"})
 
         self.assertTrue(form.is_valid(), form.errors)
+
+    def test_ctf_form_saves_prompt(self) -> None:
+        form = CtfForm(
+            {
+                "title": "Prompt CTF",
+                "slug": "prompt-ctf",
+                "description": "",
+                "prompt": "Always answer in Korean.",
+                "settings_yaml": "",
+            }
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        ctf = form.save()
+        self.assertEqual(ctf.prompt, "Always answer in Korean.")
 
     def test_provider_create_and_update_from_web(self) -> None:
         self.client.force_login(self.allowed_user)
@@ -1155,6 +1171,7 @@ class StreamEventRecordingTests(TestCase):
         self.assertEqual(len(agent.interrupts), 1)
         self.assertIsInstance(agent.interrupts[0], Prompt)
         self.assertEqual(cast(Prompt, agent.interrupts[0]).text, "try another path")
+        self.assertEqual(agent.additional_prompts, [""])
         self.assertEqual(
             self._recorded_event_tuples(),
             [
@@ -1163,6 +1180,27 @@ class StreamEventRecordingTests(TestCase):
                 ("agent_stream", "item.terminated", ""),
             ],
         )
+
+    def test_run_agent_stream_passes_ctf_prompt_to_agent(self) -> None:
+        agent = _PromptRecordingAgent()
+
+        status = async_to_sync(services._run_agent_stream)(
+            thread_id=self.thread.pk,
+            agent=agent,
+            challenge=CoreChallenge(
+                id=self.challenge.challenge_id,
+                description="",
+                directory=Path("/tmp"),
+            ),
+            workspace=Path("/tmp"),
+            metadata=Path("/tmp"),
+            webhook=None,
+            model_name="gpt-5.5",
+            ctf_prompt="Use Korean for all replies.",
+        )
+
+        self.assertEqual(status, Thread.Status.WAITING)
+        self.assertEqual(agent.additional_prompts, ["Use Korean for all replies."])
 
     def test_thread_root_reuses_existing_root_when_resuming(self) -> None:
         self.thread.thread_root = "/tmp/catchy-existing-thread"
@@ -1184,6 +1222,7 @@ class _SteerRecordingAgent(Agent):
         workspace_directory: Path,
         metadata_directory: Path,
         webhook: Any | None = None,
+        additional_prompt: str | None = None,
     ) -> AsyncGenerator[Event[Any], Interrupt]:
         interrupt = yield _AppEvent(
             raw={
@@ -1207,6 +1246,7 @@ class _SteerRecordingAgent(Agent):
 class _PromptRecordingAgent(Agent):
     def __init__(self) -> None:
         self.interrupts: list[Interrupt] = []
+        self.additional_prompts: list[str | None] = []
 
     async def stream(
         self,
@@ -1215,7 +1255,9 @@ class _PromptRecordingAgent(Agent):
         workspace_directory: Path,
         metadata_directory: Path,
         webhook: Any | None = None,
+        additional_prompt: str | None = None,
     ) -> AsyncGenerator[Event[Any], Interrupt]:
+        self.additional_prompts.append(additional_prompt)
         interrupt = yield _AppEvent(
             raw={
                 "source": "agent_stream",
@@ -1348,6 +1390,19 @@ class PublicThreadAccessTests(TestCase):
         self.assertContains(response, "$7.100000")
         thread.refresh_from_db()
         self.assertEqual(thread.latest_cost["cost_usd"], "7.100000")
+
+    def test_ctf_detail_renders_prompt_markdown_container(self) -> None:
+        self.ctf.prompt = "## Rules\n- Be concise"
+        self.ctf.save(update_fields=["prompt", "updated_at"])
+        self.client.force_login(self.user)
+
+        response = self.client.get(
+            reverse("ctf:ctf_detail", kwargs={"slug": self.ctf.slug})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'id="ctf-prompt-md"', html=False)
+        self.assertContains(response, 'data-md-from="ctf-prompt-md"', html=False)
 
     def test_anonymous_can_view_public_thread(self) -> None:
         thread = self._create_thread("public-detail", is_public=True)

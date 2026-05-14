@@ -16,4 +16,5 @@ class Agent[T](ABC):
         workspace_directory: Path,
         metadata_directory: Path,
         webhook: Webhook | None = None,
+        additional_prompt: str | None = None,
     ) -> AsyncGenerator[Event[T], Interrupt]: ...

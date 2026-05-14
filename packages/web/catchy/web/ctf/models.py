@@ -301,6 +301,7 @@ class Ctf(TimeStampedModel):
     title = models.CharField(max_length=200)
     slug = models.SlugField(unique=True)
     description = models.TextField(blank=True)
+    prompt = models.TextField(blank=True, default="")
     settings = models.TextField(blank=True, default="")
     view_groups = models.ManyToManyField(
         Group, blank=True, related_name="viewable_ctfs"

@@ -191,6 +191,7 @@ def _ignore_runtime_metadata(directory: str, names: list[str]) -> set[str]:
 def run_thread_sync(thread_id: int) -> None:
     thread = (
         Thread.objects.select_related(
+            "ctf",
             "challenge",
             "challenge__ctf",
             "agent",
@@ -257,6 +258,7 @@ def run_thread_sync(thread_id: int) -> None:
                 metadata=metadata,
                 webhook=webhook,
                 model_name=_thread_model_name(thread),
+                ctf_prompt=thread.ctf.prompt,
             )
         )
     except Exception as exc:
@@ -409,6 +411,7 @@ async def _run_agent_stream(
     metadata: Path,
     webhook: Webhook | None,
     model_name: str,
+    ctf_prompt: str = "",
 ) -> Thread.Status:
     initial_interrupt: Interrupt = Nop()
     initial_command = await sync_to_async(
@@ -428,6 +431,7 @@ async def _run_agent_stream(
         workspace_directory=workspace,
         metadata_directory=metadata,
         webhook=webhook,
+        additional_prompt=ctf_prompt,
     )
     interrupt: Interrupt = initial_interrupt
     renderers: dict[str, EventRenderer[Any]] = {}
