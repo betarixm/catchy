@@ -879,26 +879,40 @@ class ClaudeCodeHandoffExporter(HandoffExporter[Message]):
 
     def export(self, event: Event[Message]) -> str:
         chunks: list[str] = []
-        for component in self._renderer.render(event):
-            markdown = self._component_markdown(component)
-            if markdown:
-                chunks.append(markdown)
-        return "".join(chunks)
+        pending_label: str | None = None
+        pending_text = ""
 
-    def _component_markdown(self, component: Component) -> str:
-        match component:
-            case Delta() as delta:
-                if not delta.text.strip():
-                    return ""
-                label = self._delta_label(delta.tag)
-                if label is None:
-                    return ""
-                return f"- **{label}:** {delta.text.strip()}\n"
-            case TextLog() | JsonLog() | TokenUsage() | ItemCompleted() | TurnStarted() | TurnCompleted() | ThreadStarted():
-                return ""
-            case Nop():
-                return ""
-        return ""
+        def flush_pending() -> None:
+            nonlocal pending_label, pending_text
+            if pending_label is None:
+                return
+            text = pending_text.strip()
+            if text:
+                chunks.append(f"- **{pending_label}:** {text}\n")
+            pending_label = None
+            pending_text = ""
+
+        for component in self._renderer.render(event):
+            match component:
+                case Delta() as delta:
+                    label = self._delta_label(delta.tag)
+                    if label is None or not delta.text:
+                        flush_pending()
+                        continue
+                    if pending_label is None:
+                        pending_label = label
+                        pending_text = delta.text
+                        continue
+                    if pending_label == label:
+                        pending_text += delta.text
+                        continue
+                    flush_pending()
+                    pending_label = label
+                    pending_text = delta.text
+                case TextLog() | JsonLog() | TokenUsage() | ItemCompleted() | TurnStarted() | TurnCompleted() | ThreadStarted() | Nop():
+                    flush_pending()
+        flush_pending()
+        return "".join(chunks)
 
     def _delta_label(self, tag: str) -> str | None:
         return {
