@@ -21,7 +21,7 @@ from docker import DockerClient
 from docker.errors import DockerException
 
 from catchy.codex import CodexAgent
-from catchy.core.agents.models import (
+from catchy.core.agent.models import (
     Chunk,
     ItemCompleted,
     Log,

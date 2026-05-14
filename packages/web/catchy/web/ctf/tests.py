@@ -12,7 +12,7 @@ from typing import Any
 from unittest.mock import patch
 
 from asgiref.sync import async_to_sync
-from catchy.core.agents.models import (
+from catchy.core.agent.models import (
     Chunk,
     Event,
     Interrupt,
@@ -23,7 +23,7 @@ from catchy.core.agents.models import (
     Stop,
     TokenUsage,
 )
-from catchy.core.agents.protocols import Agent
+from catchy.core.agent.protocols import Agent
 from catchy.core.challenge.models import Challenge as CoreChallenge
 from django.contrib.auth.models import Group, User
 from django.core.exceptions import PermissionDenied

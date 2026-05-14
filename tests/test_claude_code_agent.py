@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from catchy.claude_code import ClaudeCodeAgent
-from catchy.core.agents.models import Chunk, ItemCompleted, Nop, TokenUsage, TurnCompleted
+from catchy.core.agent.models import Chunk, ItemCompleted, Nop, TokenUsage, TurnCompleted
 from claude_agent_sdk import ResultMessage, StreamEvent
 
 

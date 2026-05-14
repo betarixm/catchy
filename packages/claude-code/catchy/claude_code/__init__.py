@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncGenerator, Literal, cast
 
-from catchy.core.agents.models import (
+from catchy.core.agent.models import (
     Chunk,
     Event,
     Interrupt,
@@ -24,7 +24,7 @@ from catchy.core.agents.models import (
     TokenUsage,
     TurnCompleted,
 )
-from catchy.core.agents.protocols import Agent
+from catchy.core.agent.protocols import Agent
 from catchy.core.challenge.models import Challenge
 from catchy.core.webhook.models import Webhook
 from claude_agent_sdk import (

@@ -105,7 +105,7 @@ from typing import AsyncGenerator
 
 from pydantic import BaseModel
 
-from catchy.core.agents.protocols import Agent
+from catchy.core.agent.protocols import Agent
 from catchy.core.challenge.models import Challenge
 from catchy.core.webhook.models import Webhook
 

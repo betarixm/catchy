@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from asgiref.sync import sync_to_async
-from catchy.core.agents.models import (
+from catchy.core.agent.models import (
     Chunk,
     Event,
     Interrupt,
@@ -24,7 +24,7 @@ from catchy.core.agents.models import (
     TokenUsage,
     TurnCompleted,
 )
-from catchy.core.agents.protocols import Agent
+from catchy.core.agent.protocols import Agent
 from catchy.core.challenge.models import Challenge as CoreChallenge
 from catchy.core.webhook.models import Webhook
 from django.conf import settings
