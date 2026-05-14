@@ -328,7 +328,6 @@ class CodexAgent(Agent[Notification]):
         workspace_directory: Path,
         metadata_directory: Path,
         webhook: Webhook | None = None,
-        prompt: str | None = None,
     ) -> AsyncGenerator[Event[Notification], Interrupt]:
         if not workspace_directory.exists():
             raise ValueError(f"workspace does not exist: {workspace_directory}")
@@ -392,11 +391,10 @@ class CodexAgent(Agent[Notification]):
                             f"Expected at most one thread, but found {len(threads)}"
                         )
 
-                default_prompt = Template(self._user_prompt_template).render(
+                next_prompt = Template(self._user_prompt_template).render(
                     challenge=challenge,
                     webhook=webhook,
                 )
-                next_prompt: str | None = prompt or default_prompt
 
                 while next_prompt is not None:
                     turn = await thread.turn(TextInput(next_prompt))

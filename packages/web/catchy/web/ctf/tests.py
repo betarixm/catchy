@@ -9,7 +9,7 @@ import zipfile
 from collections.abc import AsyncGenerator
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 from asgiref.sync import async_to_sync
@@ -17,6 +17,7 @@ from catchy.claude_code import ClaudeCodeEvent, ClaudeCodeEventRenderer
 from catchy.core.agent.models import (
     Event,
     Interrupt,
+    Prompt,
     Steer,
     Stop,
 )
@@ -1151,7 +1152,9 @@ class StreamEventRecordingTests(TestCase):
         )
 
         self.assertEqual(status, Thread.Status.WAITING)
-        self.assertEqual(agent.prompts, ["try another path"])
+        self.assertEqual(len(agent.interrupts), 1)
+        self.assertIsInstance(agent.interrupts[0], Prompt)
+        self.assertEqual(cast(Prompt, agent.interrupts[0]).text, "try another path")
         self.assertEqual(
             self._recorded_event_tuples(),
             [
@@ -1181,7 +1184,6 @@ class _SteerRecordingAgent(Agent):
         workspace_directory: Path,
         metadata_directory: Path,
         webhook: Any | None = None,
-        prompt: str | None = None,
     ) -> AsyncGenerator[Event[Any], Interrupt]:
         interrupt = yield _AppEvent(
             raw={
@@ -1204,7 +1206,7 @@ class _SteerRecordingAgent(Agent):
 
 class _PromptRecordingAgent(Agent):
     def __init__(self) -> None:
-        self.prompts: list[str | None] = []
+        self.interrupts: list[Interrupt] = []
 
     async def stream(
         self,
@@ -1213,10 +1215,8 @@ class _PromptRecordingAgent(Agent):
         workspace_directory: Path,
         metadata_directory: Path,
         webhook: Any | None = None,
-        prompt: str | None = None,
     ) -> AsyncGenerator[Event[Any], Interrupt]:
-        self.prompts.append(prompt)
-        yield _AppEvent(
+        interrupt = yield _AppEvent(
             raw={
                 "source": "agent_stream",
                 "kind": "chunk",
@@ -1224,6 +1224,7 @@ class _PromptRecordingAgent(Agent):
                 "raw": {"tag": "action"},
             },
         )
+        self.interrupts.append(interrupt)
         yield _AppEvent(
             raw={
                 "source": "agent_stream",

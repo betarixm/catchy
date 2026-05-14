@@ -361,7 +361,6 @@ class ClaudeCodeAgent(Agent[Message]):
         workspace_directory: Path,
         metadata_directory: Path,
         webhook: Webhook | None = None,
-        prompt: str | None = None,
     ) -> AsyncGenerator[Event[Message], Interrupt]:
         if not workspace_directory.exists():
             raise ValueError(f"workspace does not exist: {workspace_directory}")
@@ -379,11 +378,10 @@ class ClaudeCodeAgent(Agent[Message]):
             f=metadata_directory / "configuration.yaml",
         )
 
-        default_prompt = Template(self._user_prompt_template).render(
+        next_prompt = Template(self._user_prompt_template).render(
             challenge=challenge,
             webhook=webhook,
         )
-        next_prompt: str | None = prompt or default_prompt
 
         with self._docker_container(
             challenge=challenge,
@@ -694,9 +692,7 @@ class ClaudeCodeEventRenderer(EventRenderer[Message]):
                 elif event_type == "message_delta":
                     raw_usage = payload.get("usage")
                     if isinstance(raw_usage, dict):
-                        yield self._token_usage_from(
-                            cast(dict[str, Any], raw_usage)
-                        )
+                        yield self._token_usage_from(cast(dict[str, Any], raw_usage))
                 elif event_type == "content_block_start":
                     content_block = payload.get("content_block")
                     index = payload.get("index")

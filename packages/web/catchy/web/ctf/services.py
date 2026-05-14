@@ -410,18 +410,16 @@ async def _run_agent_stream(
     webhook: Webhook | None,
     model_name: str,
 ) -> Thread.Status:
-    initial_prompt: str | None = None
+    initial_interrupt: Interrupt = Nop()
     initial_command = await sync_to_async(
         _pop_next_thread_command,
         thread_sensitive=True,
     )(thread_id)
     match initial_command:
-        case Prompt() as prompt:
-            initial_prompt = prompt.text
+        case Prompt() | Steer():
+            initial_interrupt = initial_command
         case Stop():
             return Thread.Status.STOPPED
-        case Steer() as steer:
-            initial_prompt = steer.text
         case Nop():
             ...
 
@@ -430,9 +428,8 @@ async def _run_agent_stream(
         workspace_directory=workspace,
         metadata_directory=metadata,
         webhook=webhook,
-        prompt=initial_prompt,
     )
-    interrupt: Interrupt = Nop()
+    interrupt: Interrupt = initial_interrupt
     renderers: dict[str, EventRenderer[Any]] = {}
     is_started = False
     stop_requested = False
@@ -457,6 +454,8 @@ async def _run_agent_stream(
             model_name,
             renderer,
         )
+        if not isinstance(interrupt, Nop):
+            continue
         command = await sync_to_async(
             _pop_next_thread_command,
             thread_sensitive=True,
