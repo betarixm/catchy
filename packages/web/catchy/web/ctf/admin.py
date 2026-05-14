@@ -90,8 +90,8 @@ class ThreadAdmin(admin.ModelAdmin):
 
 @admin.register(StreamEvent)
 class StreamEventAdmin(admin.ModelAdmin):
-    list_display = ["thread", "sequence", "source", "kind", "created_at"]
-    list_filter = ["source", "kind"]
+    list_display = ["thread", "format", "created_at"]
+    list_filter = ["format"]
 
 
 @admin.register(SteeringMessage)

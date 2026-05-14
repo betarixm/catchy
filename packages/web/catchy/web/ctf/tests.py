@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import importlib
+import json
 import tarfile
 import tempfile
 import zipfile
@@ -12,24 +13,22 @@ from typing import Any
 from unittest.mock import patch
 
 from asgiref.sync import async_to_sync
+from catchy.claude_code import ClaudeCodeEvent, ClaudeCodeEventRenderer
 from catchy.core.agent.models import (
-    Chunk,
     Event,
     Interrupt,
-    ItemCompleted,
-    Log,
-    Nop,
     Steer,
     Stop,
-    TokenUsage,
 )
 from catchy.core.agent.protocols import Agent
 from catchy.core.challenge.models import Challenge as CoreChallenge
+from claude_agent_sdk import StreamEvent as ClaudeStreamEvent
 from django.contrib.auth.models import Group, User
 from django.core.exceptions import PermissionDenied
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
+from pydantic import field_serializer, field_validator
 
 from catchy.web.ctf import services, views
 from catchy.web.ctf.forms import (
@@ -57,6 +56,34 @@ from catchy.web.ctf.source_archives import (
     DownloadedSourceArchive,
     safe_extract_archive,
 )
+
+try:
+    from catchy.codex import CodexEvent as _CodexEvent
+    from catchy.codex import CodexEventRenderer as _CodexEventRenderer
+except Exception:
+    _CodexEvent = None
+    _CodexEventRenderer = None
+
+
+class _AppEvent(Event[dict[str, object]]):
+    format: str = services.APP_EVENT_FORMAT
+
+    @field_validator("raw", mode="before")
+    @classmethod
+    def _deserialize_raw(cls, value: object) -> dict[str, object]:
+        if isinstance(value, dict):
+            return {str(key): item for key, item in value.items()}
+        if isinstance(value, str):
+            payload = json.loads(value)
+            if isinstance(payload, dict):
+                return {str(key): item for key, item in payload.items()}
+        raise ValueError("raw must be a dict or serialized JSON object")
+
+    @field_serializer("raw")
+    def _serialize_raw(self, value: dict[str, object]) -> str:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
 
 
 class CredentialAgentPermissionTests(TestCase):
@@ -731,54 +758,109 @@ class StreamEventRecordingTests(TestCase):
             agent=self.agent,
         )
 
-    def test_record_stream_event_persists_chunk_tag(self) -> None:
+    def _recorded_payload(self) -> dict[str, object]:
+        event = StreamEvent.objects.get(thread=self.thread)
+        return views._event_payload(event, thread=self.thread)
+
+    def _recorded_event_tuples(self) -> list[tuple[object, object, object]]:
+        return [
+            (payload["source"], payload["kind"], payload["text"])
+            for payload in views._event_payloads(
+                list(StreamEvent.objects.filter(thread=self.thread)),
+                thread=self.thread,
+            )
+        ]
+
+    def _record_codex_event(
+        self,
+        method: str,
+        payload: dict[str, object],
+        *,
+        model_name: str = "gpt-5.5",
+    ) -> None:
+        if _CodexEvent is None or _CodexEventRenderer is None:
+            self.skipTest("catchy.codex is not importable in this environment")
+        event: Event[Any] = _CodexEvent(raw={"method": method, "payload": payload})
+        renderer = _CodexEventRenderer(model_name=model_name)
         services._record_stream_event(
             self.thread.pk,
-            Chunk(tag="action", text="hello"),
-            "gpt-5.5",
+            event,
+            model_name,
+            renderer,
+        )
+
+    def _record_claude_event(
+        self,
+        raw: object,
+        *,
+        model_name: str = "claude-sonnet-4-5",
+    ) -> None:
+        event = ClaudeCodeEvent(raw=raw)
+        services._record_stream_event(
+            self.thread.pk,
+            event,
+            model_name,
+            ClaudeCodeEventRenderer(model_name=model_name),
+        )
+
+    def test_record_stream_event_persists_chunk_tag(self) -> None:
+        self._record_codex_event(
+            "item/agentMessage/delta",
+            {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "itemId": "item-1",
+                "delta": "hello",
+            },
         )
 
         event = StreamEvent.objects.get(thread=self.thread)
-        self.assertEqual(event.source, "agent_stream")
-        self.assertEqual(event.kind, "chunk")
-        self.assertEqual(event.text, "hello")
-        self.assertEqual(event.raw, {"tag": "action"})
+        payload = self._recorded_payload()
+        self.assertEqual(event.format, "codex-notification")
+        self.assertEqual(payload["source"], "agent_stream")
+        self.assertEqual(payload["kind"], "chunk")
+        self.assertEqual(payload["text"], "hello")
+        self.assertEqual(payload["raw"], {"tag": "action"})
 
     def test_record_stream_event_persists_log_event(self) -> None:
-        services._record_stream_event(
-            self.thread.pk,
-            Log(
-                kind="token_count",
-                text='{"total":{"inputTokens":1,"outputTokens":2}}',
-                raw={
-                    "tokenUsage": {
-                        "total": {
-                            "inputTokens": 1,
-                            "cachedInputTokens": 0,
-                            "outputTokens": 2,
-                        }
-                    }
-                },
-            ),
-            "gpt-5.5",
-        )
-
-        event = StreamEvent.objects.get(thread=self.thread)
-        self.assertEqual(event.source, "agent_stream")
-        self.assertEqual(event.kind, "token_count")
-        self.assertEqual(event.text, '{"total":{"inputTokens":1,"outputTokens":2}}')
-        self.assertEqual(
-            event.raw,
+        self._record_codex_event(
+            "thread/tokenUsage/updated",
             {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
                 "tokenUsage": {
+                    "last": {
+                        "inputTokens": 1,
+                        "cachedInputTokens": 0,
+                        "outputTokens": 2,
+                        "reasoningOutputTokens": 0,
+                        "totalTokens": 3,
+                    },
                     "total": {
                         "inputTokens": 1,
                         "cachedInputTokens": 0,
                         "outputTokens": 2,
+                        "reasoningOutputTokens": 0,
+                        "totalTokens": 3,
                     }
-                }
+                },
             },
         )
+
+        payload = self._recorded_payload()
+        self.assertEqual(payload["source"], "agent_stream")
+        self.assertEqual(payload["kind"], "token_count")
+        self.assertEqual(
+            payload["text"],
+            '{"input_tokens":1,"output_tokens":2,"total_tokens":3}',
+        )
+        self.assertIsInstance(payload["raw"], dict)
+        self.assertEqual(payload["raw"]["provider"], "openai")
+        self.assertEqual(payload["raw"]["source"], "thread_token_usage_updated")
+        self.assertEqual(payload["raw"]["usage"]["input_tokens"], 1)
+        self.assertEqual(payload["raw"]["usage"]["output_tokens"], 2)
+        self.assertEqual(payload["raw"]["usage"]["total_tokens"], 3)
+        self.assertEqual(payload["raw"]["raw"]["threadId"], "thread-1")
         self.thread.refresh_from_db()
         self.assertEqual(self.thread.latest_cost["provider"], "openai")
         self.assertEqual(self.thread.latest_cost["model"], "gpt-5.5")
@@ -789,38 +871,42 @@ class StreamEventRecordingTests(TestCase):
         self.assertEqual(ThreadCostSnapshot.objects.count(), 1)
 
     def test_record_stream_event_persists_standard_token_usage_event(self) -> None:
-        services._record_stream_event(
-            self.thread.pk,
-            TokenUsage(
-                provider="openai",
-                model="gpt-5.5",
-                source="thread_token_usage_updated",
-                input_tokens=1,
-                output_tokens=2,
-                raw={"turnId": "turn-1"},
-            ),
-            "fallback-model",
-        )
-
-        event = StreamEvent.objects.get(thread=self.thread)
-        self.assertEqual(event.source, "agent_stream")
-        self.assertEqual(event.kind, "token_count")
-        self.assertEqual(
-            event.raw,
+        self._record_codex_event(
+            "thread/tokenUsage/updated",
             {
-                "provider": "openai",
-                "model": "gpt-5.5",
-                "source": "thread_token_usage_updated",
-                "usage": {
-                    "input_tokens": 1,
-                    "output_tokens": 2,
-                    "total_tokens": 3,
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "tokenUsage": {
+                    "last": {
+                        "inputTokens": 1,
+                        "cachedInputTokens": 0,
+                        "outputTokens": 2,
+                        "reasoningOutputTokens": 0,
+                        "totalTokens": 3,
+                    },
+                    "total": {
+                        "inputTokens": 1,
+                        "cachedInputTokens": 0,
+                        "outputTokens": 2,
+                        "reasoningOutputTokens": 0,
+                        "totalTokens": 3,
+                    }
                 },
-                "raw": {"turnId": "turn-1"},
             },
         )
-        self.assertNotIn("pricing", event.raw)
-        self.assertNotIn("usd", event.raw)
+
+        payload = self._recorded_payload()
+        self.assertEqual(payload["source"], "agent_stream")
+        self.assertEqual(payload["kind"], "token_count")
+        self.assertIsInstance(payload["raw"], dict)
+        self.assertEqual(payload["raw"]["provider"], "openai")
+        self.assertEqual(payload["raw"]["source"], "thread_token_usage_updated")
+        self.assertEqual(payload["raw"]["usage"]["input_tokens"], 1)
+        self.assertEqual(payload["raw"]["usage"]["output_tokens"], 2)
+        self.assertEqual(payload["raw"]["usage"]["total_tokens"], 3)
+        self.assertEqual(payload["raw"]["raw"]["threadId"], "thread-1")
+        self.assertNotIn("pricing", payload["raw"])
+        self.assertNotIn("usd", payload["raw"])
         self.thread.refresh_from_db()
         self.assertEqual(self.thread.latest_cost["model"], "gpt-5.5")
         self.assertEqual(self.thread.latest_cost["input_tokens"], 1)
@@ -841,18 +927,28 @@ class StreamEventRecordingTests(TestCase):
         self.thread.model = model
         self.thread.save(update_fields=["model", "updated_at"])
 
-        services._record_stream_event(
-            self.thread.pk,
-            TokenUsage(
-                provider="openai",
-                model="gpt-5.5",
-                source="thread_token_usage_updated",
-                input_tokens=1_000_000,
-                cached_input_tokens=100_000,
-                cache_read_input_tokens=200_000,
-                output_tokens=500_000,
-            ),
-            "fallback-model",
+        self._record_codex_event(
+            "thread/tokenUsage/updated",
+            {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "tokenUsage": {
+                    "last": {
+                        "inputTokens": 1_000_000,
+                        "cachedInputTokens": 100_000,
+                        "outputTokens": 500_000,
+                        "reasoningOutputTokens": 0,
+                        "totalTokens": 1_600_000,
+                    },
+                    "total": {
+                        "inputTokens": 1_000_000,
+                        "cachedInputTokens": 100_000,
+                        "outputTokens": 500_000,
+                        "reasoningOutputTokens": 0,
+                        "totalTokens": 1_600_000,
+                    }
+                },
+            },
         )
 
         event = StreamEvent.objects.get(thread=self.thread)
@@ -861,29 +957,39 @@ class StreamEventRecordingTests(TestCase):
         self.assertNotIn("pricing", self.thread.latest_cost)
         self.assertNotIn("usd", ThreadCostSnapshot.objects.get().usage)
         payload = views._event_payload(event, thread=self.thread)
-        self.assertEqual(payload["cost_usd"], "7.100000")
+        self.assertEqual(payload["cost_usd"], "6.900000")
 
     def test_record_stream_event_persists_item_termination(self) -> None:
-        services._record_stream_event(
-            self.thread.pk,
-            ItemCompleted(),
-            "gpt-5.5",
+        self._record_codex_event(
+            "item/completed",
+            {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "type": "commandExecution",
+                    "id": "item-1",
+                    "command": "pytest -q",
+                    "cwd": "/workspace",
+                    "status": "completed",
+                    "commandActions": [],
+                    "exitCode": 0,
+                    "aggregatedOutput": "",
+                },
+            },
         )
 
-        event = StreamEvent.objects.get(thread=self.thread)
-        self.assertEqual(event.source, "agent_stream")
-        self.assertEqual(event.kind, "item.terminated")
-        self.assertEqual(event.text, "")
+        payload = self._recorded_payload()
+        self.assertEqual(payload["source"], "agent_stream")
+        self.assertEqual(payload["kind"], "item.terminated")
+        self.assertEqual(payload["text"], "")
 
     def test_record_stream_event_persists_claude_usage_log_event(self) -> None:
-        services._record_stream_event(
-            self.thread.pk,
-            Log(
-                kind="token_count",
-                text='{"input_tokens":10,"output_tokens":5}',
-                raw={
-                    "provider": "anthropic",
-                    "source": "result_message",
+        self._record_claude_event(
+            ClaudeStreamEvent(
+                uuid="event-usage-1",
+                session_id="session-1",
+                event={
+                    "type": "message_delta",
                     "usage": {
                         "input_tokens": 10,
                         "cache_creation_input_tokens": 3,
@@ -891,14 +997,14 @@ class StreamEventRecordingTests(TestCase):
                         "output_tokens": 5,
                     },
                 },
-            ),
-            "claude-sonnet-4-5",
+            )
         )
 
-        event = StreamEvent.objects.get(thread=self.thread)
-        self.assertEqual(event.source, "agent_stream")
-        self.assertEqual(event.kind, "token_count")
-        self.assertEqual(event.raw["provider"], "anthropic")
+        payload = self._recorded_payload()
+        self.assertEqual(payload["source"], "agent_stream")
+        self.assertEqual(payload["kind"], "token_count")
+        self.assertIsInstance(payload["raw"], dict)
+        self.assertEqual(payload["raw"]["provider"], "anthropic")
         self.thread.refresh_from_db()
         self.assertEqual(
             self.thread.latest_cost,
@@ -906,9 +1012,9 @@ class StreamEventRecordingTests(TestCase):
                 "provider": "anthropic",
                 "model": "claude-sonnet-4-5",
                 "input_tokens": 10,
-                "cached_input_tokens": 0,
-                "cache_creation_input_tokens": 3,
-                "cache_read_input_tokens": 2,
+                "cached_input_tokens": 2,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "output_tokens": 5,
                 "reasoning_output_tokens": 0,
                 "total_tokens": 20,
@@ -919,25 +1025,28 @@ class StreamEventRecordingTests(TestCase):
     def test_record_stream_event_persists_standard_claude_token_usage_event(
         self,
     ) -> None:
-        services._record_stream_event(
-            self.thread.pk,
-            TokenUsage(
-                provider="anthropic",
-                model="claude-sonnet-4-5",
-                source="result_message",
-                input_tokens=10,
-                cache_creation_input_tokens=3,
-                cache_read_input_tokens=2,
-                output_tokens=5,
-            ),
-            "fallback-model",
+        self._record_claude_event(
+            ClaudeStreamEvent(
+                uuid="event-usage-2",
+                session_id="session-1",
+                event={
+                    "type": "message_delta",
+                    "usage": {
+                        "input_tokens": 10,
+                        "cache_creation_input_tokens": 3,
+                        "cache_read_input_tokens": 2,
+                        "output_tokens": 5,
+                    },
+                },
+            )
         )
 
-        event = StreamEvent.objects.get(thread=self.thread)
-        self.assertEqual(event.source, "agent_stream")
-        self.assertEqual(event.kind, "token_count")
-        self.assertEqual(event.raw["provider"], "anthropic")
-        self.assertNotIn("usd", event.raw)
+        payload = self._recorded_payload()
+        self.assertEqual(payload["source"], "agent_stream")
+        self.assertEqual(payload["kind"], "token_count")
+        self.assertIsInstance(payload["raw"], dict)
+        self.assertEqual(payload["raw"]["provider"], "anthropic")
+        self.assertNotIn("usd", payload["raw"])
         self.thread.refresh_from_db()
         self.assertEqual(
             self.thread.latest_cost,
@@ -945,9 +1054,9 @@ class StreamEventRecordingTests(TestCase):
                 "provider": "anthropic",
                 "model": "claude-sonnet-4-5",
                 "input_tokens": 10,
-                "cached_input_tokens": 0,
-                "cache_creation_input_tokens": 3,
-                "cache_read_input_tokens": 2,
+                "cached_input_tokens": 2,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "output_tokens": 5,
                 "reasoning_output_tokens": 0,
                 "total_tokens": 20,
@@ -955,22 +1064,37 @@ class StreamEventRecordingTests(TestCase):
         )
 
     def test_record_stream_event_uses_structured_chunk_tags_as_kind(self) -> None:
+        self._record_claude_event(
+            ClaudeStreamEvent(
+                uuid="event-1",
+                session_id="session-1",
+                event={
+                    "type": "content_block_delta",
+                    "index": 1,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": '{"path":"README.md"}',
+                    },
+                },
+            )
+        )
+
+        payload = self._recorded_payload()
+        self.assertEqual(payload["source"], "agent_stream")
+        self.assertEqual(payload["kind"], "tool_input")
+        self.assertEqual(payload["text"], '{"path":"README.md"}')
+        self.assertEqual(payload["raw"], {"tag": "tool_input"})
+
+    def test_record_stream_event_persists_unknown_raw_event(self) -> None:
         services._record_stream_event(
             self.thread.pk,
-            Chunk(tag="tool_use", text='{"name":"Read"}'),
-            "claude-sonnet-4-5",
+            _AppEvent(format="unknown-agent-event", raw={"raw": True}),
+            "gpt-5.5",
         )
 
         event = StreamEvent.objects.get(thread=self.thread)
-        self.assertEqual(event.source, "agent_stream")
-        self.assertEqual(event.kind, "tool_use")
-        self.assertEqual(event.text, '{"name":"Read"}')
-        self.assertEqual(event.raw, {"tag": "tool_use"})
-
-    def test_record_stream_event_ignores_nop(self) -> None:
-        services._record_stream_event(self.thread.pk, Nop(), "gpt-5.5")
-
-        self.assertFalse(StreamEvent.objects.filter(thread=self.thread).exists())
+        self.assertEqual(event.format, "unknown-agent-event")
+        self.assertEqual(event.raw, '{"raw":true}')
 
     def test_pop_next_thread_command_returns_steer_interrupt(self) -> None:
         SteeringMessage.objects.create(
@@ -986,11 +1110,7 @@ class StreamEventRecordingTests(TestCase):
         message = SteeringMessage.objects.get(thread=self.thread)
         self.assertIsNotNone(message.delivered_at)
         self.assertEqual(
-            list(
-                StreamEvent.objects.filter(thread=self.thread).values_list(
-                    "source", "kind", "text"
-                )
-            ),
+            self._recorded_event_tuples(),
             [("user", "steer", "try another path")],
         )
 
@@ -1004,11 +1124,7 @@ class StreamEventRecordingTests(TestCase):
 
         self.assertIsInstance(command, Stop)
         self.assertEqual(
-            list(
-                StreamEvent.objects.filter(thread=self.thread).values_list(
-                    "source", "kind", "text"
-                )
-            ),
+            self._recorded_event_tuples(),
             [("user", "stop", "")],
         )
 
@@ -1037,11 +1153,7 @@ class StreamEventRecordingTests(TestCase):
         self.assertEqual(status, Thread.Status.WAITING)
         self.assertEqual(agent.prompts, ["try another path"])
         self.assertEqual(
-            list(
-                StreamEvent.objects.filter(thread=self.thread).values_list(
-                    "source", "kind", "text"
-                )
-            ),
+            self._recorded_event_tuples(),
             [
                 ("user", "prompt", "try another path"),
                 ("agent_stream", "chunk", "ready"),
@@ -1066,14 +1178,28 @@ class _SteerRecordingAgent(Agent):
         self,
         *,
         challenge: CoreChallenge,
-        workspace: Path,
+        workspace_directory: Path,
         metadata_directory: Path,
         webhook: Any | None = None,
         prompt: str | None = None,
-    ) -> AsyncGenerator[Event, Interrupt]:
-        interrupt = yield Chunk(tag="action", text="ready")
+    ) -> AsyncGenerator[Event[Any], Interrupt]:
+        interrupt = yield _AppEvent(
+            raw={
+                "source": "agent_stream",
+                "kind": "chunk",
+                "text": "ready",
+                "raw": {"tag": "action"},
+            },
+        )
         self.interrupts.append(interrupt)
-        yield ItemCompleted()
+        yield _AppEvent(
+            raw={
+                "source": "agent_stream",
+                "kind": "item.terminated",
+                "text": "",
+                "raw": {},
+            },
+        )
 
 
 class _PromptRecordingAgent(Agent):
@@ -1084,14 +1210,28 @@ class _PromptRecordingAgent(Agent):
         self,
         *,
         challenge: CoreChallenge,
-        workspace: Path,
+        workspace_directory: Path,
         metadata_directory: Path,
         webhook: Any | None = None,
         prompt: str | None = None,
-    ) -> AsyncGenerator[Event, Interrupt]:
+    ) -> AsyncGenerator[Event[Any], Interrupt]:
         self.prompts.append(prompt)
-        yield Chunk(tag="action", text="ready")
-        yield ItemCompleted()
+        yield _AppEvent(
+            raw={
+                "source": "agent_stream",
+                "kind": "chunk",
+                "text": "ready",
+                "raw": {"tag": "action"},
+            },
+        )
+        yield _AppEvent(
+            raw={
+                "source": "agent_stream",
+                "kind": "item.terminated",
+                "text": "",
+                "raw": {},
+            },
+        )
 
 
 class PublicThreadAccessTests(TestCase):
@@ -1103,6 +1243,39 @@ class PublicThreadAccessTests(TestCase):
             slug="codex",
             yaml="{}",
         )
+
+    def _create_stream_event(
+        self,
+        thread: Thread,
+        *,
+        source: str,
+        kind: str,
+        text: str = "",
+        raw: dict[str, object] | None = None,
+    ) -> StreamEvent:
+        return StreamEvent.objects.create(
+            thread=thread,
+            format=services.APP_EVENT_FORMAT,
+            raw=json.dumps(
+                {
+                    "source": source,
+                    "kind": kind,
+                    "text": text,
+                    "raw": raw or {},
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
+
+    def _event_tuples(self, thread: Thread) -> list[tuple[object, object, object]]:
+        return [
+            (payload["source"], payload["kind"], payload["text"])
+            for payload in views._event_payloads(
+                list(StreamEvent.objects.filter(thread=thread)),
+                thread=thread,
+            )
+        ]
 
     def test_anonymous_dashboard_groups_only_public_threads_by_ctf(self) -> None:
         public_thread = self._create_thread("public", is_public=True)
@@ -1371,10 +1544,8 @@ class PublicThreadAccessTests(TestCase):
 
     def test_thread_stream_replays_workspace_changed_stream_event(self) -> None:
         thread = self._create_thread("workspace-stream", is_public=True)
-        StreamEvent.objects.create(
+        self._create_stream_event(
             thread=thread,
-            sequence=1,
-            dedupe_key="workspace.changed:1",
             source="system",
             kind="workspace.changed",
             text="Workspace updated",
@@ -1388,49 +1559,6 @@ class PublicThreadAccessTests(TestCase):
 
         self.assertIn('"kind": "workspace.changed"', body)
         self.assertIn('"changed_paths": ["workspace/src/main.py"]', body)
-
-    def test_thread_filetree_shows_workspace_only(self) -> None:
-        thread = self._create_thread("workspace-only", is_public=True)
-        self.client.force_login(self.user)
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            thread_root = Path(temp_dir) / f"thread-{thread.pk}"
-            workspace = thread_root / "workspace"
-            metadata = thread_root / "metadata"
-            source = thread_root / "source"
-            (workspace / "src").mkdir(parents=True)
-            metadata.mkdir(parents=True)
-            source.mkdir(parents=True)
-            (workspace / "README.md").write_text("hello\n", encoding="utf-8")
-            (workspace / "src" / "main.py").write_text("print('hi')\n", encoding="utf-8")
-            (metadata / "secret.txt").write_text("nope\n", encoding="utf-8")
-            (source / "archive.txt").write_text("nope\n", encoding="utf-8")
-
-            thread.thread_root = str(thread_root)
-            thread.workspace_path = str(workspace)
-            thread.metadata_path = str(metadata)
-            thread.save(
-                update_fields=[
-                    "thread_root",
-                    "workspace_path",
-                    "metadata_path",
-                    "updated_at",
-                ]
-            )
-
-            response = self.client.get(
-                reverse("ctf:thread_filetree", kwargs={"thread_uuid": thread.uuid})
-            )
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["name"], "workspace")
-        self.assertEqual(payload["type"], "dir")
-        child_names = {child["name"] for child in payload["children"]}
-        self.assertIn("README.md", child_names)
-        self.assertIn("src", child_names)
-        self.assertNotIn("metadata", child_names)
-        self.assertNotIn("source", child_names)
 
     def test_authenticated_user_can_publish_and_unpublish_thread(self) -> None:
         thread = self._create_thread("publishable", is_public=False)
@@ -1624,7 +1752,7 @@ class PublicThreadAccessTests(TestCase):
         self.assertRedirects(response, thread.get_absolute_url())
         self.assertEqual(thread.status, Thread.Status.STOPPED)
         self.assertEqual(
-            list(thread.events.values_list("source", "kind", "text")),
+            self._event_tuples(thread),
             [("user", "stop", "")],
         )
 
@@ -1656,10 +1784,8 @@ class PublicThreadAccessTests(TestCase):
             thread.thread_root = str(source_root)
             thread.metadata_path = str(source_metadata)
             thread.save(update_fields=["thread_root", "metadata_path", "updated_at"])
-            StreamEvent.objects.create(
+            self._create_stream_event(
                 thread=thread,
-                sequence=1,
-                dedupe_key="history-one",
                 source="agent_stream",
                 kind="chunk",
                 text="hello",
@@ -1681,7 +1807,7 @@ class PublicThreadAccessTests(TestCase):
         self.assertEqual(fork.agent, thread.agent)
         self.assertEqual(fork.metadata_path, str(target_root / "metadata"))
         self.assertEqual(
-            list(fork.events.values_list("source", "kind", "text")),
+            self._event_tuples(fork),
             [
                 ("agent_stream", "chunk", "hello"),
                 ("system", "thread.forked", f"Forked from thread #{thread.pk}"),
@@ -1748,18 +1874,14 @@ class PublicThreadAccessTests(TestCase):
 
     def test_thread_stream_starts_after_requested_sequence(self) -> None:
         thread = self._create_thread("stream-after", is_public=True)
-        StreamEvent.objects.create(
+        first = self._create_stream_event(
             thread=thread,
-            sequence=1,
-            dedupe_key="one",
             source="system",
             kind="thread.started",
             text="one",
         )
-        StreamEvent.objects.create(
+        second = self._create_stream_event(
             thread=thread,
-            sequence=2,
-            dedupe_key="two",
             source="system",
             kind="thread.completed",
             text="two",
@@ -1767,38 +1889,39 @@ class PublicThreadAccessTests(TestCase):
 
         response = self.client.get(
             reverse("ctf:thread_stream", kwargs={"thread_uuid": thread.uuid}),
-            {"after": "1"},
+            {"after": str(first.pk)},
         )
         body = b"".join(response.streaming_content).decode()
 
-        self.assertNotIn('"sequence": 1', body)
-        self.assertIn("id: 2", body)
-        self.assertIn('"sequence": 2', body)
+        self.assertNotIn(f'"sequence": {first.pk}', body)
+        self.assertIn(f"id: {second.pk}", body)
+        self.assertIn(f'"sequence": {second.pk}', body)
         self.assertEqual(response.headers["X-Accel-Buffering"], "no")
 
     def test_thread_stream_resumes_after_last_event_id(self) -> None:
         thread = self._create_thread("stream-last-event-id", is_public=True)
+        events = []
         for sequence in range(1, 4):
-            StreamEvent.objects.create(
-                thread=thread,
-                sequence=sequence,
-                dedupe_key=str(sequence),
-                source="system",
-                kind="thread.event",
-                text=str(sequence),
+            events.append(
+                self._create_stream_event(
+                    thread=thread,
+                    source="system",
+                    kind="thread.event",
+                    text=str(sequence),
+                )
             )
 
         response = self.client.get(
             reverse("ctf:thread_stream", kwargs={"thread_uuid": thread.uuid}),
-            {"after": "1"},
-            headers={"Last-Event-ID": "2"},
+            {"after": str(events[0].pk)},
+            headers={"Last-Event-ID": str(events[1].pk)},
         )
         body = b"".join(response.streaming_content).decode()
 
-        self.assertNotIn('"sequence": 1', body)
-        self.assertNotIn('"sequence": 2', body)
-        self.assertIn("id: 3", body)
-        self.assertIn('"sequence": 3', body)
+        self.assertNotIn(f'"sequence": {events[0].pk}', body)
+        self.assertNotIn(f'"sequence": {events[1].pk}', body)
+        self.assertIn(f"id: {events[2].pk}", body)
+        self.assertIn(f'"sequence": {events[2].pk}', body)
 
     def test_thread_stream_status_advertises_reconnect_retry(self) -> None:
         thread = self._create_thread("stream-waiting-retry", is_public=True)

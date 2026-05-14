@@ -7,14 +7,14 @@ from ..webhook.models import Webhook
 from .models import Event, Interrupt
 
 
-class Agent(ABC):
+class Agent[T](ABC):
     key: str
 
     def stream(
         self,
         challenge: Challenge,
-        workspace: Path,
+        workspace_directory: Path,
         metadata_directory: Path,
         webhook: Webhook | None = None,
         prompt: str | None = None,
-    ) -> AsyncGenerator[Event, Interrupt]: ...
+    ) -> AsyncGenerator[Event[T], Interrupt]: ...

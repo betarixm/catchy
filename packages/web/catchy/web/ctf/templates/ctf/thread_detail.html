@@ -250,13 +250,27 @@
     #file-stats {
       font-family: var(--sans);
     }
+    .bubble-row.thinking { align-self: stretch; max-width: 92%; }
+    .bubble.thinking {
+      background: var(--paper-deep);
+      color: var(--muted);
+      font-style: italic;
+      border-color: var(--rule-soft);
+    }
+    .bubble.thinking p,
+    .bubble.thinking li { font-style: italic; }
   </style>
 
   <script>
     function isWorkspaceUpdatedEvent(event) {
       if (!event || typeof event !== 'object') return false;
-      if (event.source !== 'system') return false;
-      if (event.kind === 'workspace.changed') return true;
+      if (event.source === "system" && event.kind === "workspace.changed") return true;
+      if (Array.isArray(event.components)) {
+        return event.components.some((component) =>
+          component.source === "system" && component.kind === "workspace.changed"
+        );
+      }
+      return false;
     }
 
     // File tree state and functions
@@ -415,6 +429,7 @@
       const toggle = document.getElementById('file-tree-toggle');
       treeState.statsPane = document.getElementById('file-stats');
       if (!treeState.pane) return;
+      // thread_filetree
       treeState.fileTreeUrl = new URL('{% url "ctf:thread_filetree" thread.uuid %}', window.location.origin);
 
       if (toggle && treeState.paneShell) {
@@ -446,6 +461,7 @@
       let currentAssistantMeta = null;
       let currentAssistantStartTs = null;
       let currentAssistantEndTs = null;
+      let currentAssistantTag = null;
       let currentRail = null;
       let currentObservationTerminal = null;
       let currentObservationText = "";
@@ -599,6 +615,7 @@
         currentAssistantMeta = null;
         currentAssistantStartTs = null;
         currentAssistantEndTs = null;
+        currentAssistantTag = null;
       }
 
       function flushObservationTerminal() {
@@ -614,8 +631,9 @@
 
       function updateAssistantMeta() {
         if (!currentAssistantMeta) return;
+        const label = currentAssistantTag === "thinking" ? "thinking" : "agent";
         currentAssistantMeta.textContent =
-          `agent · ${fmtTime(currentAssistantStartTs)} → ${fmtTime(currentAssistantEndTs)}`;
+          `${label} · ${fmtTime(currentAssistantStartTs)} → ${fmtTime(currentAssistantEndTs)}`;
       }
 
       function appendAssistantDelta(ev) {
@@ -623,11 +641,19 @@
         if (!text) return;
         flushRail();
         flushObservationTerminal();
+        const tag = chunkTag(ev) || "action";
+        if (currentAssistantBubble && currentAssistantTag !== tag) {
+          flushAssistantBubble();
+        }
         if (!currentAssistantBubble) {
           const row = document.createElement("div");
           row.className = "bubble-row assistant";
           const bubble = document.createElement("div");
           bubble.className = "bubble assistant";
+          if (tag === "thinking") {
+            row.classList.add("thinking");
+            bubble.classList.add("thinking");
+          }
           const meta = document.createElement("div");
           meta.className = "bubble-meta";
           row.appendChild(bubble);
@@ -637,6 +663,7 @@
           currentAssistantMeta = meta;
           currentAssistantStartTs = ev.created_at;
           currentAssistantText = "";
+          currentAssistantTag = tag;
         }
         currentAssistantEndTs = ev.created_at;
         currentAssistantText += text;
@@ -771,6 +798,12 @@
       }
 
       function renderEvent(ev) {
+        if (Array.isArray(ev.components) && ev.components.length) {
+          for (const component of ev.components) {
+            renderEvent({ ...component, sequence: ev.sequence, created_at: ev.created_at });
+          }
+          return;
+        }
         if (typeof ev.sequence === "number") {
           lastSequenceSeen = Math.max(lastSequenceSeen, ev.sequence);
         }

@@ -3,10 +3,25 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterator
+from enum import Enum
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 from uuid import UUID
 
+from catchy.core.agent.models import (
+    Component,
+    Delta,
+    Event,
+    EventRenderer,
+    ItemCompleted,
+    Nop,
+    JsonLog,
+    TextLog,
+    ThreadStarted,
+    TokenUsage,
+    TurnCompleted,
+    TurnStarted,
+)
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import redirect_to_login
@@ -40,6 +55,7 @@ from .models import (
     Thread,
 )
 from .services import (
+    APP_EVENT_FORMAT,
     build_agent_configuration,
     cached_token_usage_cost_usd,
     fork_thread,
@@ -585,7 +601,7 @@ def thread_detail(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
             "thread": thread,
             "latest_cost_usd": latest_cost_usd,
             "events": events,
-            "events_json": [_event_payload(event, thread=thread) for event in events],
+            "events_json": _event_payloads(events, thread=thread),
             "can_manage_thread": can_manage_thread,
             "can_prompt_thread": can_manage_thread
             and thread.status in promptable_statuses,
@@ -688,19 +704,17 @@ def thread_stop(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
         thread.save(update_fields=["status", "updated_at"])
         StreamEvent.objects.create(
             thread=thread,
-            sequence=(
-                StreamEvent.objects.filter(thread=thread)
-                .order_by("-sequence")
-                .values_list("sequence", flat=True)
-                .first()
-                or 0
-            )
-            + 1,
-            dedupe_key=f"user:stop:{timezone.now().timestamp()}",
-            source="user",
-            kind="stop",
-            text="",
-            raw={"user_id": request.user.pk},
+            format=APP_EVENT_FORMAT,
+            raw=json.dumps(
+                {
+                    "source": "user",
+                    "kind": "stop",
+                    "text": "",
+                    "raw": {"user_id": request.user.pk},
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
         )
         messages.success(request, "Thread stopped.")
         return redirect(thread)
@@ -800,15 +814,23 @@ def thread_filetree(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
 
 
 def _event_stream(thread_id: int, last_sequence: int = 0) -> Iterator[str]:
+    renderers: dict[str, EventRenderer[Any]] = {}
+    if last_sequence:
+        thread = Thread.objects.select_related("model").get(pk=thread_id)
+        for event in StreamEvent.objects.filter(
+            thread_id=thread_id, id__lte=last_sequence
+        ).order_by("id"):
+            _components_from_event(event, thread=thread, renderers=renderers)
+
     while True:
         thread = Thread.objects.select_related(
             "agent", "model", "credential", "credential__provider", "created_by"
         ).get(pk=thread_id)
         for event in _events_after(thread_id, last_sequence):
-            last_sequence = event.sequence
-            yield f"id: {event.sequence}\n"
+            last_sequence = event.pk or last_sequence
+            yield f"id: {event.pk}\n"
             yield "event: stream\n"
-            payload = _event_payload(event, thread=thread)
+            payload = _event_payload(event, thread=thread, renderers=renderers)
             yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
         if thread.status in {
@@ -872,30 +894,263 @@ def _attach_thread_costs(threads: QuerySet[Thread] | list[Thread]) -> list[Threa
 
 
 def _events_after(thread_id: int, sequence: int) -> QuerySet[StreamEvent]:
-    return StreamEvent.objects.filter(
-        thread_id=thread_id, sequence__gt=sequence
-    ).order_by("sequence")
+    return StreamEvent.objects.filter(thread_id=thread_id, id__gt=sequence).order_by(
+        "id"
+    )
+
+
+def _event_payloads(
+    events: list[StreamEvent],
+    *,
+    thread: Thread,
+) -> list[dict[str, object]]:
+    renderers: dict[str, EventRenderer[Any]] = {}
+    return [
+        _event_payload(event, thread=thread, renderers=renderers) for event in events
+    ]
 
 
 def _event_payload(
     event: StreamEvent,
     *,
     thread: Thread | None = None,
+    renderers: dict[str, EventRenderer[Any]] | None = None,
 ) -> dict[str, object]:
+    if event.format == APP_EVENT_FORMAT:
+        return _app_event_payload(event, thread=thread)
+
+    components = _components_from_event(event, thread=thread, renderers=renderers)
+    if not components and event.format == "codex-notification":
+        if payload := _codex_payload_from_raw(event, thread=thread):
+            return payload
+    component_payloads = [
+        payload
+        for component in components
+        if (payload := _component_payload(event, component, thread=thread)) is not None
+    ]
+    if component_payloads:
+        payload = dict(component_payloads[0])
+    else:
+        payload = {
+            "sequence": event.pk,
+            "source": "agent_stream",
+            "kind": event.format,
+            "text": "",
+            "raw": {},
+            "format": event.format,
+            "created_at": event.created_at.isoformat(),
+        }
+    if len(component_payloads) > 1:
+        payload["components"] = component_payloads
+    return payload
+
+
+def _app_event_payload(
+    event: StreamEvent,
+    *,
+    thread: Thread | None = None,
+) -> dict[str, object]:
+    try:
+        app_raw = json.loads(event.raw) if event.raw else {}
+    except json.JSONDecodeError:
+        app_raw = {}
+    if not isinstance(app_raw, dict):
+        app_raw = {}
+    raw = app_raw.get("raw")
+    raw_dict = raw if isinstance(raw, dict) else {}
+    kind = app_raw.get("kind")
     payload: dict[str, object] = {
-        "sequence": event.sequence,
-        "source": event.source,
-        "kind": event.kind,
-        "text": event.text,
-        "raw": event.raw,
+        "sequence": event.pk,
+        "source": app_raw.get("source")
+        if isinstance(app_raw.get("source"), str)
+        else "",
+        "kind": kind if isinstance(kind, str) else event.format,
+        "text": app_raw.get("text") if isinstance(app_raw.get("text"), str) else "",
+        "raw": raw_dict,
+        "format": event.format,
         "created_at": event.created_at.isoformat(),
     }
-    if event.kind == "token_count" and thread is not None:
+    if kind == "token_count" and thread is not None:
         model_name = thread.model.name if thread.model is not None else None
-        cost_usd = token_usage_cost_usd(thread, raw=event.raw, model_name=model_name)
+        cost_usd = token_usage_cost_usd(thread, raw=raw_dict, model_name=model_name)
         if cost_usd is not None:
             payload["cost_usd"] = str(cost_usd)
     return payload
+
+
+def _components_from_event(
+    event: StreamEvent,
+    *,
+    thread: Thread | None = None,
+    renderers: dict[str, EventRenderer[Any]] | None = None,
+) -> list[Component]:
+    renderer = _event_renderer(event, thread=thread, renderers=renderers)
+    if renderer is None:
+        return []
+    raw_event = _raw_event(event)
+    if raw_event is None:
+        return []
+    try:
+        return list(renderer.render(raw_event))
+    except Exception:
+        return []
+
+
+def _event_renderer(
+    event: StreamEvent,
+    *,
+    thread: Thread | None,
+    renderers: dict[str, EventRenderer[Any]] | None,
+) -> EventRenderer[Any] | None:
+    if renderers is not None and event.format in renderers:
+        return renderers[event.format]
+    model_name = thread.model.name if thread is not None and thread.model else None
+    try:
+        if event.format == "codex-notification":
+            from catchy.codex import CodexEventRenderer
+
+            renderer: EventRenderer[Any] = CodexEventRenderer(model_name=model_name)
+        elif event.format == "claude-code-message":
+            from catchy.claude_code import ClaudeCodeEventRenderer
+
+            renderer = ClaudeCodeEventRenderer(model_name=model_name)
+        else:
+            return None
+    except Exception:
+        return None
+    if renderers is not None:
+        renderers[event.format] = renderer
+    return renderer
+
+
+def _raw_event(event: StreamEvent) -> Event[Any] | None:
+    try:
+        if event.format == "codex-notification":
+            from catchy.codex import CodexEvent
+
+            return cast(Event[Any], CodexEvent(raw=event.raw))
+        if event.format == "claude-code-message":
+            from catchy.claude_code import ClaudeCodeEvent
+
+            return cast(Event[Any], ClaudeCodeEvent(raw=event.raw))
+        return None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _component_payload(
+    event: StreamEvent,
+    component: Component,
+    *,
+    thread: Thread | None = None,
+) -> dict[str, object] | None:
+    source = "agent_stream"
+    kind = ""
+    text = ""
+    raw: dict[str, object] = {}
+    match component:
+        case TextLog() as log:
+            kind = log.tag
+            text = log.text
+        case JsonLog() as log:
+            kind = log.tag
+            text = json.dumps(
+                log.data,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=_json_default,
+            )
+            parsed = json.loads(text)
+            raw = parsed if isinstance(parsed, dict) else {"value": parsed}
+        case TokenUsage() as usage:
+            kind = "token_count"
+            source = "agent_stream"
+            usage_source = (
+                "thread_token_usage_updated"
+                if event.format == "codex-notification"
+                else "stream_token_usage_updated"
+            )
+            provider = (
+                thread.credential.provider.slug
+                if (
+                    thread is not None
+                    and thread.credential is not None
+                    and thread.credential.provider is not None
+                )
+                else ("anthropic" if event.format == "claude-code-message" else "openai")
+            )
+            model_name = thread.model.name if thread is not None and thread.model else ""
+            event_raw: dict[str, object]
+            try:
+                decoded = json.loads(event.raw) if event.raw else {}
+            except json.JSONDecodeError:
+                decoded = {}
+            event_raw = decoded if isinstance(decoded, dict) else {}
+            raw = {
+                "provider": provider,
+                "model": model_name,
+                "source": usage_source,
+                "usage": {
+                    "input_tokens": usage.input_tokens,
+                    "cached_input_tokens": usage.cached_input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "reasoning_output_tokens": usage.reasoning_output_tokens,
+                    "total_tokens": usage.total_tokens,
+                },
+                "raw": event_raw,
+            }
+            text = json.dumps(raw["usage"], separators=(",", ":"))
+        case Delta() as delta:
+            if not delta.text:
+                return None
+            if delta.tag == "tool_input":
+                kind = "tool_input"
+                raw = {"tag": "tool_input"}
+            elif delta.tag == "thinking":
+                kind = "chunk"
+                raw = {"tag": "thinking"}
+            elif delta.tag == "observation":
+                kind = "chunk"
+                raw = {"tag": "observation"}
+            elif delta.tag == "user":
+                kind = "chunk"
+                raw = {"tag": "user"}
+            else:
+                kind = "chunk"
+                raw = {"tag": "action"}
+            text = delta.text
+        case ItemCompleted():
+            kind = "item.terminated"
+        case TurnCompleted():
+            kind = "turn.completed"
+        case TurnStarted():
+            kind = "turn.started"
+        case ThreadStarted():
+            kind = "thread.started"
+        case Nop():
+            return None
+
+    payload: dict[str, object] = {
+        "sequence": event.pk,
+        "source": source,
+        "kind": kind,
+        "text": text,
+        "raw": raw,
+        "format": event.format,
+        "created_at": event.created_at.isoformat(),
+    }
+    if kind == "token_count" and thread is not None:
+        model_name = thread.model.name if thread.model is not None else None
+        cost_usd = token_usage_cost_usd(thread, raw=raw, model_name=model_name)
+        if cost_usd is not None:
+            payload["cost_usd"] = str(cost_usd)
+    return payload
+
+
+def _json_default(value: object) -> object:
+    if isinstance(value, Enum):
+        return value.value
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
 
 
 def _nonnegative_int(value: str | None) -> int:
@@ -905,3 +1160,98 @@ def _nonnegative_int(value: str | None) -> int:
         return max(int(value), 0)
     except ValueError:
         return 0
+
+
+def _codex_payload_from_raw(
+    event: StreamEvent,
+    *,
+    thread: Thread | None = None,
+) -> dict[str, object] | None:
+    try:
+        raw = json.loads(event.raw) if event.raw else {}
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    method = raw.get("method")
+    payload = raw.get("payload")
+    if not isinstance(method, str) or not isinstance(payload, dict):
+        return None
+
+    source = "agent_stream"
+    kind = method
+    text = ""
+    item_raw: dict[str, object] = {}
+
+    if method == "item/agentMessage/delta":
+        kind = "chunk"
+        text = str(payload.get("delta") or "")
+        item_raw = {"tag": "action"}
+    elif method == "item/reasoning/textDelta":
+        kind = "thinking"
+        text = str(payload.get("delta") or "")
+        item_raw = {"tag": "thinking"}
+    elif method == "item/commandExecution/outputDelta":
+        kind = "chunk"
+        text = str(payload.get("delta") or "")
+        item_raw = {"tag": "observation"}
+    elif method == "item/completed":
+        kind = "item.terminated"
+    elif method == "turn/completed":
+        kind = "turn.completed"
+    elif method == "item/started":
+        kind = "tool_use"
+        item = payload.get("item")
+        if isinstance(item, dict):
+            text = json.dumps(item, ensure_ascii=False, sort_keys=True)
+        item_raw = {"tag": "tool_use"}
+    elif method == "thread/tokenUsage/updated":
+        kind = "token_count"
+        token_usage = payload.get("tokenUsage")
+        usage = token_usage.get("last") if isinstance(token_usage, dict) else {}
+        usage_dict = usage if isinstance(usage, dict) else {}
+        parsed_usage = {
+            "input_tokens": _nonnegative_int(str(usage_dict.get("inputTokens", 0))),
+            "cached_input_tokens": _nonnegative_int(
+                str(usage_dict.get("cachedInputTokens", 0))
+            ),
+            "output_tokens": _nonnegative_int(str(usage_dict.get("outputTokens", 0))),
+            "reasoning_output_tokens": _nonnegative_int(
+                str(usage_dict.get("reasoningOutputTokens", 0))
+            ),
+            "total_tokens": _nonnegative_int(str(usage_dict.get("totalTokens", 0))),
+        }
+        model_name = thread.model.name if thread is not None and thread.model else ""
+        provider = (
+            thread.credential.provider.slug
+            if (
+                thread is not None
+                and thread.credential is not None
+                and thread.credential.provider is not None
+            )
+            else "openai"
+        )
+        item_raw = {
+            "provider": provider,
+            "model": model_name,
+            "source": "thread_token_usage_updated",
+            "usage": parsed_usage,
+            "raw": raw,
+        }
+        text = json.dumps(parsed_usage, separators=(",", ":"))
+
+    result: dict[str, object] = {
+        "sequence": event.pk,
+        "source": source,
+        "kind": kind,
+        "text": text,
+        "raw": item_raw,
+        "format": event.format,
+        "created_at": event.created_at.isoformat(),
+    }
+    if kind == "token_count" and thread is not None:
+        model_name = thread.model.name if thread.model is not None else None
+        cost_usd = token_usage_cost_usd(thread, raw=item_raw, model_name=model_name)
+        if cost_usd is not None:
+            result["cost_usd"] = str(cost_usd)
+    return result

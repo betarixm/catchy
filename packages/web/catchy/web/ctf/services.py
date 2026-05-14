@@ -12,25 +12,20 @@ from typing import Any, cast
 
 from asgiref.sync import sync_to_async
 from catchy.core.agent.models import (
-    Chunk,
     Event,
+    EventRenderer,
     Interrupt,
-    ItemCompleted,
-    Log,
     Nop,
     Prompt,
     Steer,
     Stop,
     TokenUsage,
-    TurnCompleted,
 )
 from catchy.core.agent.protocols import Agent
 from catchy.core.challenge.models import Challenge as CoreChallenge
 from catchy.core.webhook.models import Webhook
 from django.conf import settings
 from django.core.exceptions import PermissionDenied
-from django.db import transaction
-from django.db.models import Max
 from django.utils import timezone
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -48,6 +43,7 @@ from .models import (
 from .source_archives import safe_extract_archive
 
 _CODEX_RUNTIME_METADATA_DIRS = frozenset({".tmp", "tmp"})
+APP_EVENT_FORMAT = "catchy-app-event"
 THREAD_COST_USD_KEY = "cost_usd"
 _WORKSPACE_REFRESH_DEBOUNCE_SECONDS = 0.35
 _workspace_refresh_lock = threading.Lock()
@@ -170,14 +166,10 @@ def fork_thread(thread: Thread, *, user: Any | None = None) -> Thread:
         ]
     )
 
-    for event in thread.events.order_by("sequence"):
+    for event in thread.events.order_by("id"):
         StreamEvent.objects.create(
             thread=fork,
-            sequence=event.sequence,
-            dedupe_key=event.dedupe_key,
-            source=event.source,
-            kind=event.kind,
-            text=event.text,
+            format=event.format,
             raw=event.raw,
         )
     _record_event(
@@ -299,7 +291,7 @@ def load_agent(
     model_configuration: ModelConfiguration | None = None,
     credential: Credential | None = None,
     user: Any | None = None,
-) -> Agent:
+) -> Agent[Any]:
     data = build_agent_configuration(
         agent_configuration,
         model_configuration=model_configuration,
@@ -411,7 +403,7 @@ def _credential_configuration_for_agent(
 async def _run_agent_stream(
     *,
     thread_id: int,
-    agent: Agent,
+    agent: Agent[Any],
     challenge: CoreChallenge,
     workspace: Path,
     metadata: Path,
@@ -435,12 +427,13 @@ async def _run_agent_stream(
 
     stream = agent.stream(
         challenge=challenge,
-        workspace=workspace,
+        workspace_directory=workspace,
         metadata_directory=metadata,
         webhook=webhook,
         prompt=initial_prompt,
     )
     interrupt: Interrupt = Nop()
+    renderers: dict[str, EventRenderer[Any]] = {}
     is_started = False
     stop_requested = False
     while True:
@@ -453,10 +446,16 @@ async def _run_agent_stream(
         except StopAsyncIteration:
             return Thread.Status.STOPPED if stop_requested else Thread.Status.WAITING
 
+        renderer = _renderer_for_event(
+            event,
+            model_name=model_name,
+            renderers=renderers,
+        )
         await sync_to_async(_record_stream_event, thread_sensitive=True)(
             thread_id,
             event,
             model_name,
+            renderer,
         )
         command = await sync_to_async(
             _pop_next_thread_command,
@@ -467,75 +466,109 @@ async def _run_agent_stream(
         interrupt = command
 
 
-def _record_stream_event(thread_id: int, event: Event, model_name: str) -> None:
+def _record_stream_event(
+    thread_id: int,
+    event: Event[Any],
+    model_name: str,
+    renderer: EventRenderer[Any] | None = None,
+) -> None:
     thread = Thread.objects.select_related(
         "model", "credential", "credential__provider"
     ).get(pk=thread_id)
-    match event:
-        case Chunk() as chunk:
-            if not chunk.text:
-                return
-            _record_event(
-                thread,
-                source="agent_stream",
-                kind=_stream_chunk_kind(chunk.tag),
-                text=chunk.text,
-                raw={"tag": chunk.tag},
-            )
-        case Log() as log:
-            if not log.text and not log.raw:
-                return
-            raw = dict(log.raw)
-            _record_event(
-                thread,
-                source="agent_stream",
-                kind=log.kind,
-                text=log.text,
-                raw=raw,
-            )
-            if log.kind == "token_count":
-                _record_token_usage_snapshot(
-                    thread,
-                    model_name=model_name,
-                    raw=raw,
-                )
-        case TokenUsage() as usage:
-            raw = usage.event_raw()
-            text = json.dumps(raw["usage"], separators=(",", ":"))
-            _record_event(
-                thread,
-                source="agent_stream",
-                kind="token_count",
-                text=text,
-                raw=raw,
+    StreamEvent.objects.create(
+        thread=thread,
+        format=event.format,
+        raw=_event_raw_to_string(event),
+    )
+    components = list(renderer.render(event)) if renderer is not None else []
+    for component in components:
+        if isinstance(component, TokenUsage):
+            usage_raw = _token_usage_component_raw(
+                thread=thread,
+                event=event,
+                usage=component,
+                model_name=model_name,
             )
             _record_token_usage_snapshot(
                 thread,
-                model_name=usage.model or model_name,
-                raw=raw,
+                model_name=str(usage_raw.get("model") or model_name),
+                raw=usage_raw,
             )
-        case ItemCompleted():
-            _record_event(
-                thread,
-                source="agent_stream",
-                kind="item.terminated",
-                text="",
-            )
-        case TurnCompleted():
-            _record_event(
-                thread,
-                source="agent_stream",
-                kind="turn.completed",
-                text="",
-            )
-        case Nop():
-            return
 
 
-def _stream_chunk_kind(tag: str) -> str:
-    if tag in {"thinking", "tool_input", "tool_use"}:
-        return tag
-    return "chunk"
+def _renderer_for_event(
+    event: Event[Any],
+    *,
+    model_name: str | None,
+    renderers: dict[str, EventRenderer[Any]],
+) -> EventRenderer[Any] | None:
+    if event.format in renderers:
+        return renderers[event.format]
+    try:
+        if event.format == "codex-notification":
+            from catchy.codex import CodexEventRenderer
+
+            renderer: EventRenderer[Any] = CodexEventRenderer(model_name=model_name)
+        elif event.format == "claude-code-message":
+            from catchy.claude_code import ClaudeCodeEventRenderer
+
+            renderer = ClaudeCodeEventRenderer(model_name=model_name)
+        else:
+            return None
+    except Exception:
+        return None
+    renderers[event.format] = renderer
+    return renderer
+
+
+def _event_raw_to_string(event: Event[Any]) -> str:
+    dumped = event.model_dump(mode="json")
+    raw = dumped.get("raw")
+    if isinstance(raw, str):
+        return raw
+    return json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+
+
+def _event_raw_object(event: Event[Any]) -> dict[str, Any]:
+    raw_string = _event_raw_to_string(event)
+    try:
+        parsed = json.loads(raw_string)
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(parsed, dict):
+        return {str(key): value for key, value in parsed.items()}
+    return {}
+
+
+def _token_usage_component_raw(
+    *,
+    thread: Thread,
+    event: Event[Any],
+    usage: TokenUsage,
+    model_name: str,
+) -> dict[str, Any]:
+    provider_slug = _provider_slug_for_thread(thread) or (
+        "anthropic" if event.format == "claude-code-message" else "openai"
+    )
+    source = (
+        "thread_token_usage_updated"
+        if event.format == "codex-notification"
+        else "stream_token_usage_updated"
+    )
+    usage_payload = {
+        "input_tokens": usage.input_tokens,
+        "cached_input_tokens": usage.cached_input_tokens,
+        "output_tokens": usage.output_tokens,
+        "reasoning_output_tokens": usage.reasoning_output_tokens,
+        "total_tokens": usage.total_tokens,
+    }
+    return {
+        "provider": provider_slug,
+        "model": model_name,
+        "source": source,
+        "usage": usage_payload,
+        "raw": _event_raw_object(event),
+    }
 
 
 def _pop_next_thread_command(thread_id: int) -> Interrupt:
@@ -587,29 +620,31 @@ def _record_event(
     kind: str,
     text: str,
     raw: dict[str, Any] | None = None,
-    dedupe_key: str | None = None,
 ) -> StreamEvent:
-    with transaction.atomic():
-        sequence = (
-            StreamEvent.objects.filter(thread=thread).aggregate(Max("sequence"))[
-                "sequence__max"
-            ]
-            or 0
-        ) + 1
-        if dedupe_key is None:
-            dedupe_key = f"{source}:{sequence}"
-        event, _created = StreamEvent.objects.get_or_create(
-            thread=thread,
-            dedupe_key=dedupe_key,
-            defaults={
-                "sequence": sequence,
-                "source": source,
-                "kind": kind,
-                "text": text,
-                "raw": raw or {},
-            },
-        )
-        return event
+    return StreamEvent.objects.create(
+        thread=thread,
+        format=APP_EVENT_FORMAT,
+        raw=json.dumps(
+            _app_event_payload(source=source, kind=kind, text=text, raw=raw),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+    )
+
+
+def _app_event_payload(
+    *,
+    source: str,
+    kind: str,
+    text: str,
+    raw: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "source": source,
+        "kind": kind,
+        "text": text,
+        "raw": raw or {},
+    }
 
 
 def _agent_class_path(data: dict[str, Any]) -> str:

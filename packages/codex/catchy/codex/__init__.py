@@ -3,26 +3,30 @@ from __future__ import annotations
 import io
 import json
 import logging
-import shlex
 import tarfile
 import tomllib
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, AsyncGenerator, Literal, cast
+from typing import Annotated, AsyncGenerator, Iterator, Literal
 
 import tomli_w
 from catchy.core.agent.models import (
-    Chunk,
+    Component,
+    Delta,
     Event,
+    EventRenderer,
     Interrupt,
     ItemCompleted,
-    Log,
+    JsonLog,
     Nop,
     Prompt,
     Steer,
     Stop,
+    TextLog,
+    ThreadStarted,
     TokenUsage,
     TurnCompleted,
+    TurnStarted,
 )
 from catchy.core.agent.protocols import Agent
 from catchy.core.challenge.models import Challenge
@@ -32,66 +36,52 @@ from codex_app_server import (
     AsyncCodex,
     TextInput,
 )
+from codex_app_server.generated.notification_registry import NOTIFICATION_MODELS
 from codex_app_server.generated.v2_all import (
     AgentMessageDeltaNotification,
     CommandExecutionOutputDeltaNotification,
+    ContextCompactedNotification,
     ErrorNotification,
     FileChangeOutputDeltaNotification,
     ItemCompletedNotification,
     ItemStartedNotification,
     McpToolCallProgressNotification,
     PlanDeltaNotification,
-    ReasoningSummaryPartAddedNotification,
     ReasoningSummaryTextDeltaNotification,
     ReasoningTextDeltaNotification,
     TerminalInteractionNotification,
-    ThreadListCwdFilter,
+    ThreadStartedNotification,
     ThreadTokenUsageUpdatedNotification,
-    TurnDiffUpdatedNotification,
     TurnCompletedNotification,
+    TurnDiffUpdatedNotification,
     TurnPlanUpdatedNotification,
+    TurnStartedNotification,
     TurnStatus,
 )
+from codex_app_server.models import Notification, UnknownNotification
 from docker import DockerClient
 from docker.errors import DockerException
+from docker.models.containers import Container
 from docker.models.images import Image
 from jinja2 import Template
 from omegaconf import OmegaConf
 from pydantic import (
     BaseModel,
     ConfigDict,
+    GetPydanticSchema,
+    ValidationError,
     ValidationInfo,
     field_serializer,
     field_validator,
 )
+from pydantic_core import core_schema
 
 _LOGGER = logging.getLogger(__name__)
 
-
-def _int_value(value: object) -> int:
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    if isinstance(value, str) and value.isdecimal():
-        return int(value)
-    return 0
-
-
-def _deep_merge(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(left)
-    for key, value in right.items():
-        existing = merged.get(key)
-        if isinstance(existing, dict) and isinstance(value, dict):
-            merged[key] = _deep_merge(
-                cast(dict[str, Any], existing),
-                cast(dict[str, Any], value),
-            )
-        else:
-            merged[key] = value
-    return merged
+type NotificationValue = Annotated[
+    Notification,
+    GetPydanticSchema(lambda _source, _handler: core_schema.any_schema()),
+]
 
 
 class _OpenAICompatibleApiKeyCredential(BaseModel):
@@ -176,7 +166,47 @@ class Configuration(BaseModel):
     prompt: _PromptTemplate
 
 
-class CodexAgent(Agent):
+class CodexEvent(Event[NotificationValue]):
+    format: str = "codex-notification"
+
+    @field_validator("raw", mode="before")
+    @classmethod
+    def _deserialize_raw(cls, value: object) -> Notification:
+        if isinstance(value, Notification):
+            return value
+
+        if isinstance(value, str):
+            value = json.loads(value)
+
+        if not isinstance(value, dict):
+            raise ValidationError(
+                f"raw value must be a dict, got {type(value).__name__}"
+            )
+
+        method, payload = value.get("method"), value.get("payload")  # type: ignore
+        if not isinstance(method, str):
+            raise ValidationError(
+                f"raw value must contain a 'method' field of type str, got {method}"
+            )
+
+        Model = NOTIFICATION_MODELS[method]
+
+        return Notification(method=method, payload=Model.model_validate(payload))  # type: ignore
+
+    @field_serializer("raw")
+    def _serialize_raw(self, value: Notification) -> str:
+        if isinstance(value.payload, UnknownNotification):
+            raise ValueError(
+                f"Cannot serialize Notification with unknown payload: {value}"
+            )
+
+        return json.dumps(
+            {"method": value.method, "payload": value.payload.model_dump(mode="json")},
+            ensure_ascii=False,
+        )
+
+
+class CodexAgent(Agent[Notification]):
     key: str = "codex"
 
     @staticmethod
@@ -187,6 +217,14 @@ class CodexAgent(Agent):
                     {
                         "auth_mode": "apikey",
                         "OPENAI_API_KEY": credential.api_key,
+                        **(
+                            {
+                                "OPENAI_ORGANIZATION": credential.organization_id,
+                                "OPENAI_ORG_ID": credential.organization_id,
+                            }
+                            if credential.organization_id
+                            else {}
+                        ),
                     }
                 )
             case _CodexAuthJsonCredential() as credential:
@@ -216,20 +254,15 @@ class CodexAgent(Agent):
         docker_image: Image,
         docker_client: DockerClient,
         user_prompt_template: str,
+        auth_json_string: str,
         model_base_url: str | None = None,
-        auth_json_string: str | None = None,
-        model_api_key: str | None = None,
         model_organization_id: str | None = None,
         docker_socket: str = "/var/run/docker.sock",
     ):
         self._id = id
         self._model_name = model_name
         self._model_base_url = model_base_url
-        self._auth_json_string = auth_json_string or self._auth_json_from_api_key(
-            model_api_key=model_api_key,
-            model_organization_id=model_organization_id,
-        )
-        self._model_api_key = model_api_key
+        self._auth_json_string = auth_json_string
         self._model_organization_id = model_organization_id
         self._container_challenge_directory = container_challenge_directory
         self._container_workspace_directory = container_workspace_directory
@@ -259,24 +292,6 @@ class CodexAgent(Agent):
             raise RuntimeError(
                 f"Failed to check Codex executable in Docker image {image_name}: {error}"
             ) from error
-
-    @staticmethod
-    def _auth_json_from_api_key(
-        *,
-        model_api_key: str | None,
-        model_organization_id: str | None = None,
-    ) -> str:
-        if not model_api_key:
-            raise ValueError("auth_json_string or model_api_key is required")
-
-        payload = {
-            "auth_mode": "apikey",
-            "OPENAI_API_KEY": model_api_key,
-        }
-        if model_organization_id:
-            payload["OPENAI_ORGANIZATION"] = model_organization_id
-            payload["OPENAI_ORG_ID"] = model_organization_id
-        return json.dumps(payload)
 
     @property
     def id(self) -> str:
@@ -310,21 +325,23 @@ class CodexAgent(Agent):
     async def stream(
         self,
         challenge: Challenge,
-        workspace: Path,
+        workspace_directory: Path,
         metadata_directory: Path,
         webhook: Webhook | None = None,
         prompt: str | None = None,
-    ) -> AsyncGenerator[Event, Interrupt]:
-        if not workspace.exists():
-            raise ValueError(f"workspace does not exist: {workspace}")
-        if not workspace.is_dir():
-            raise ValueError(f"workspace is not a directory: {workspace}")
+    ) -> AsyncGenerator[Event[Notification], Interrupt]:
+        if not workspace_directory.exists():
+            raise ValueError(f"workspace does not exist: {workspace_directory}")
+        if not workspace_directory.is_dir():
+            raise ValueError(f"workspace is not a directory: {workspace_directory}")
         if not metadata_directory.exists():
             raise ValueError(f"metadata directory does not exist: {metadata_directory}")
         if not metadata_directory.is_dir():
             raise ValueError(
                 f"metadata directory is not a directory: {metadata_directory}"
             )
+
+        self._seed_metadata_directory_from_image(metadata_directory)
 
         OmegaConf.save(
             config=OmegaConf.create(self.configuration.model_dump(mode="json")),
@@ -333,7 +350,7 @@ class CodexAgent(Agent):
 
         with self._docker_container(
             challenge=challenge,
-            workspace=workspace,
+            workspace_directory=workspace_directory,
             metadata_directory=metadata_directory,
         ) as container:
             async with AsyncCodex(
@@ -357,7 +374,23 @@ class CodexAgent(Agent):
                     experimental_api=True,
                 )
             ) as codex:
-                thread = await self._resume_or_start_thread(codex, challenge.id)
+                match (await codex.thread_list()).data:
+                    case []:
+                        thread = await codex.thread_start(
+                            model=self._model_name,
+                            cwd=self._container_workspace_directory,
+                            service_name="catchy",
+                            config={},  # TODO: support custom model config
+                        )
+                    case [thread]:
+                        _LOGGER.info(
+                            f"({self.id})({challenge.id}) Resuming existing thread: {thread.id}"
+                        )
+                        thread = await codex.thread_resume(thread.id)
+                    case threads:
+                        raise RuntimeError(
+                            f"Expected at most one thread, but found {len(threads)}"
+                        )
 
                 default_prompt = Template(self._user_prompt_template).render(
                     challenge=challenge,
@@ -370,67 +403,33 @@ class CodexAgent(Agent):
                     next_prompt = None
 
                     async for codex_event in turn.stream():
-                        restart_turn = False
-                        for event in self._events_from_codex_notification(
-                            codex_event.method,
-                            codex_event.payload,
-                            turn_id=turn.id,
-                            challenge_id=challenge.id,
-                        ):
-                            interrupt = yield event
+                        interrupt = yield CodexEvent(raw=codex_event)
 
-                            match interrupt:
-                                case Steer() as steer:
-                                    await turn.steer(TextInput(steer.text))
-                                case Prompt() as prompt_interrupt:
-                                    await turn.interrupt()
-                                    next_prompt = prompt_interrupt.text
-                                    restart_turn = True
-                                    break
-                                case Stop():
-                                    await turn.interrupt()
-                                    return
-                                case Nop():
-                                    ...
+                        restart_turn = False
+                        match interrupt:
+                            case Steer() as steer:
+                                await turn.steer(TextInput(steer.text))
+                            case Prompt() as prompt_interrupt:
+                                await turn.interrupt()
+                                next_prompt = prompt_interrupt.text
+                                restart_turn = True
+                            case Stop():
+                                await turn.interrupt()
+                                return
+                            case Nop():
+                                ...
 
                         if restart_turn:
                             break
 
-    async def _resume_or_start_thread(self, codex: Any, challenge_id: str) -> Any:
-        threads = (
-            await codex.thread_list(
-                archived=False,
-                cwd=ThreadListCwdFilter(self._container_workspace_directory),
-            )
-        ).data
-
-        match threads:
-            case [thread]:
-                _LOGGER.info(
-                    f"({self.id})({challenge_id}) Resuming existing thread: {thread.id}"
-                )
-                return await codex.thread_resume(thread.id)
-            case []:
-                _LOGGER.info(f"({self.id})({challenge_id}) Starting new thread")
-                return await codex.thread_start(
-                    model=self._model_name,
-                    cwd=self._container_workspace_directory,
-                    service_name="catchy",
-                    config={},  # TODO: support custom model config
-                )
-            case _:
-                raise RuntimeError(
-                    f"Expected at most one thread, but found {len(threads)}"
-                )
-
     @contextmanager
     def _docker_container(
-        self, challenge: Challenge, workspace: Path, metadata_directory: Path
+        self, challenge: Challenge, workspace_directory: Path, metadata_directory: Path
     ):
-        assert workspace.is_dir()
+        assert workspace_directory.is_dir()
         assert metadata_directory.is_dir()
 
-        codex_home = f"{self._container_metadata_directory}/.codex"
+        container_codex_home = f"{self._container_metadata_directory}/.codex"
 
         container = self._docker_client.containers.run(
             self._docker_image,
@@ -441,8 +440,7 @@ class CodexAgent(Agent):
             security_opt=["seccomp=unconfined", "apparmor=unconfined"],
             environment={
                 "HOME": self._container_workspace_directory,
-                "CODEX_HOME": codex_home,
-                "CHROME_REMOTE_DEBUGGING_PORT": "9222",
+                "CODEX_HOME": container_codex_home,
             },
             ports={"9222/tcp": None},
             volumes={
@@ -450,7 +448,7 @@ class CodexAgent(Agent):
                     "bind": self._container_challenge_directory,
                     "mode": "ro",
                 },
-                str(workspace): {
+                str(workspace_directory): {
                     "bind": self._container_workspace_directory,
                     "mode": "rw",
                 },
@@ -463,21 +461,8 @@ class CodexAgent(Agent):
 
         try:
             _LOGGER.info(f"({self._id}) Started Docker container: {container.id}")
-            self._configure_codex_home(container, codex_home)
+            self._configure_codex_home(container, container_codex_home)
             container.reload()
-            chrome_devtools_bindings = container.attrs["NetworkSettings"]["Ports"].get(
-                "9222/tcp"
-            )
-            if chrome_devtools_bindings:
-                chrome_devtools_url = (
-                    f"http://{chrome_devtools_bindings[0]['HostIp']}:"
-                    f"{chrome_devtools_bindings[0]['HostPort']}"
-                )
-                _LOGGER.info(
-                    f"({self._id}) Chrome DevTools Protocol available after running "
-                    f"`chrome-devtools`: {chrome_devtools_url}"
-                )
-
             yield container
         finally:
             _LOGGER.info(
@@ -486,353 +471,79 @@ class CodexAgent(Agent):
             container.remove(force=True)
             _LOGGER.info(f"({self._id}) Docker container removed: {container.id}")
 
-    def _events_from_codex_notification(
-        self,
-        method: str,
-        payload: object,
-        *,
-        turn_id: str,
-        challenge_id: str,
-    ) -> list[Event]:
-        match payload:
-            case ItemStartedNotification() as notification if (
-                notification.turn_id == turn_id
-            ):
-                chunk = self._chunk_from_started_item(notification.item)
-                return [chunk] if chunk is not None else []
-            case ItemCompletedNotification() as notification if (
-                notification.turn_id == turn_id
-            ):
-                events = self._chunks_from_completed_item(notification.item)
-                events.append(ItemCompleted())
-                return events
-            case ErrorNotification() as notification if notification.turn_id == turn_id:
-                if notification.will_retry:
-                    _LOGGER.warning(
-                        "(%s)(%s) Codex turn error; server will retry: %s",
-                        self._id,
-                        challenge_id,
-                        notification.error.message,
-                    )
-                    return []
-                raise RuntimeError(
-                    "Codex reported a non-retryable turn error: "
-                    f"{notification.error.message}"
-                )
-            case TurnCompletedNotification() as notification if (
-                notification.turn.id == turn_id
-            ):
-                return [self._event_from_turn_completed(notification)]
-            case AgentMessageDeltaNotification() as notification if (
-                notification.turn_id == turn_id
-            ):
-                return self._delta_event("action", notification.delta)
-            case PlanDeltaNotification() as notification if (
-                notification.turn_id == turn_id
-            ):
-                return self._delta_event("plan", notification.delta)
-            case ReasoningSummaryTextDeltaNotification() as notification if (
-                notification.turn_id == turn_id
-            ):
-                return self._delta_event("thinking", notification.delta)
-            case ReasoningTextDeltaNotification() as notification if (
-                notification.turn_id == turn_id
-            ):
-                return self._delta_event("thinking", notification.delta)
-            case ReasoningSummaryPartAddedNotification() as notification if (
-                notification.turn_id == turn_id
-            ):
-                return [Chunk(tag="thinking", text="\n\n")]
-            case CommandExecutionOutputDeltaNotification() as notification if (
-                notification.turn_id == turn_id
-            ):
-                return self._delta_event("observation", notification.delta)
-            case FileChangeOutputDeltaNotification() as notification if (
-                notification.turn_id == turn_id
-            ):
-                return self._delta_event("observation", notification.delta)
-            case McpToolCallProgressNotification() as notification if (
-                notification.turn_id == turn_id
-            ):
-                return self._log_event(
-                    "tool_progress",
-                    notification,
-                    text=notification.message,
-                )
-            case TerminalInteractionNotification() as notification if (
-                notification.turn_id == turn_id
-            ):
-                return self._log_event(
-                    "terminal_input",
-                    notification,
-                    text=notification.stdin,
-                )
-            case TurnPlanUpdatedNotification() as notification if (
-                notification.turn_id == turn_id
-            ):
-                text = self._turn_plan_text(notification)
-                return self._log_event("plan", notification, text=text) if text else []
-            case TurnDiffUpdatedNotification() as notification if (
-                notification.turn_id == turn_id
-            ):
-                return (
-                    self._log_event("diff", notification, text=notification.diff)
-                    if notification.diff
-                    else []
-                )
-            case ThreadTokenUsageUpdatedNotification() as notification if (
-                notification.turn_id == turn_id
-            ):
-                return self._token_usage_event(notification)
-            case _:
-                _LOGGER.debug(
-                    "(%s)(%s) Ignoring Codex event: %s",
-                    self._id,
-                    challenge_id,
-                    method,
-                )
-                return []
+    def _seed_metadata_directory_from_image(self, metadata_directory: Path) -> None:
+        host_codex_home = metadata_directory / ".codex"
+        host_config_toml = host_codex_home / "config.toml"
+        if host_config_toml.exists():
+            return
 
-    def _event_from_turn_completed(
-        self, notification: TurnCompletedNotification
-    ) -> Event:
-        match notification.turn.status:
-            case TurnStatus.completed:
-                return TurnCompleted()
-            case TurnStatus.failed:
-                raise RuntimeError(
-                    "Codex turn failed: "
-                    f"{notification.turn.error.message if notification.turn.error else 'unknown error'}"
-                )
-            case TurnStatus.interrupted:
-                raise RuntimeError(
-                    "Codex turn was interrupted: "
-                    f"{notification.turn.error.message if notification.turn.error else 'unknown error'}"
-                )
-            case TurnStatus.in_progress:
-                raise RuntimeError(
-                    "Codex emitted turn/completed while the turn is still in progress"
-                )
-
-    def _delta_event(self, tag: str, delta: str) -> list[Event]:
-        return [Chunk(tag=tag, text=delta)] if delta else []
-
-    def _log_event(
-        self,
-        kind: str,
-        value: object,
-        *,
-        text: str | None = None,
-    ) -> list[Event]:
-        raw = self._json_model_payload(value)
-        if text is None:
-            text = json.dumps(raw, ensure_ascii=False) if raw else ""
-        if not text and not raw:
-            return []
-        return [Log(kind=kind, text=text, raw=raw)]
-
-    def _token_usage_event(
-        self, notification: ThreadTokenUsageUpdatedNotification
-    ) -> list[Event]:
-        raw = self._json_model_payload(notification)
-        usage = self._codex_token_usage_from_raw(raw)
-        if usage is None:
-            return []
-        raw_total_tokens = usage.get("total_tokens") or usage.get("totalTokens")
-        return [
-            TokenUsage(
-                provider="openai",
-                model=getattr(self, "_model_name", None),
-                source="thread_token_usage_updated",
-                input_tokens=_int_value(
-                    usage.get("input_tokens") or usage.get("inputTokens")
-                ),
-                cached_input_tokens=_int_value(
-                    usage.get("cached_input_tokens") or usage.get("cachedInputTokens")
-                ),
-                output_tokens=_int_value(
-                    usage.get("output_tokens") or usage.get("outputTokens")
-                ),
-                reasoning_output_tokens=_int_value(
-                    usage.get("reasoning_output_tokens")
-                    or usage.get("reasoningOutputTokens")
-                ),
-                total_tokens=_int_value(raw_total_tokens)
-                if raw_total_tokens is not None
-                else None,
-                raw=raw,
-            )
-        ]
-
-    def _codex_token_usage_from_raw(
-        self, raw: dict[str, object]
-    ) -> dict[str, Any] | None:
-        token_usage = self._first_dict(
-            raw.get("tokenUsage"),
-            raw.get("token_usage"),
-            raw.get("usage"),
+        host_codex_home.mkdir(parents=True, exist_ok=True)
+        container_config_toml = (
+            f"{self._container_metadata_directory}/.codex/config.toml"
         )
-        usage = self._first_dict(
-            token_usage.get("total"),
-            token_usage.get("total_token_usage"),
-            token_usage.get("last"),
-            token_usage.get("last_token_usage"),
-            token_usage,
+        probe_container = self._docker_client.containers.create(
+            self._docker_image,
+            command=["cat", container_config_toml],
         )
-        if not usage:
-            return None
-        return usage
 
-    def _first_dict(self, *values: object) -> dict[str, Any]:
-        for value in values:
-            if isinstance(value, dict):
-                return cast(dict[str, Any], value)
-        return {}
+        try:
+            probe_container.start()
+            result = probe_container.wait()
+            exit_code = result.get("StatusCode", 1)
+            output = probe_container.logs()
+            if exit_code != 0:
+                raise RuntimeError(
+                    "Failed to seed metadata .codex/config.toml from Docker image at "
+                    f"{container_config_toml}: {output.decode()}"
+                )
 
-    def _chunk_from_started_item(self, item: object) -> Chunk | None:
-        payload = self._thread_item_payload(item)
-        item_type = payload.get("type")
-        if not isinstance(item_type, str):
-            return None
-        if item_type in {"userMessage", "agentMessage", "plan", "reasoning"}:
-            return None
-
-        summary = self._summarize_started_item(payload)
-        return Chunk(tag="tool_use", text=json.dumps(summary, ensure_ascii=False))
-
-    def _chunks_from_completed_item(self, item: object) -> list[Event]:
-        payload = self._thread_item_payload(item)
-        item_type = payload.get("type")
-        if item_type == "exitedReviewMode":
-            review = payload.get("review")
-            return [Chunk(tag="action", text=review)] if isinstance(review, str) and review else []
-        if item_type in {"mcpToolCall", "dynamicToolCall", "collabAgentToolCall"}:
-            summary = self._summarize_completed_tool_item(payload)
-            return [Chunk(tag="observation", text=json.dumps(summary, ensure_ascii=False))]
-        return []
-
-    def _thread_item_payload(self, item: object) -> dict[str, Any]:
-        root = getattr(item, "root", item)
-        if isinstance(root, BaseModel):
-            dumped = root.model_dump(
-                by_alias=True,
-                exclude_none=True,
-                mode="json",
-                warnings=False,
+            host_config_toml.write_bytes(output)
+            _LOGGER.info(
+                "(%s) Seeded metadata .codex/config.toml from Docker image path %s",
+                self._id,
+                container_config_toml,
             )
-            return dumped
-        return {}
+        finally:
+            probe_container.remove(force=True)
 
-    def _summarize_started_item(self, payload: dict[str, Any]) -> dict[str, Any]:
-        item_type = payload.get("type")
-        summary: dict[str, Any] = {"type": item_type}
-        for key in (
-            "id",
-            "status",
-            "command",
-            "cwd",
-            "server",
-            "tool",
-            "query",
-            "path",
-            "review",
-            "source",
-            "senderThreadId",
-            "receiverThreadIds",
-        ):
-            if key in payload:
-                summary[key] = payload[key]
-
-        if item_type == "fileChange" and isinstance(payload.get("changes"), list):
-            summary["changes"] = payload["changes"]
-        if item_type in {"dynamicToolCall", "mcpToolCall"} and "arguments" in payload:
-            summary["arguments"] = payload["arguments"]
-        if item_type == "webSearch" and "action" in payload:
-            summary["action"] = payload["action"]
-        return summary
-
-    def _summarize_completed_tool_item(
-        self, payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        summary = self._summarize_started_item(payload)
-        for key in ("success", "durationMs", "error", "result", "contentItems"):
-            if key in payload:
-                summary[key] = payload[key]
-        return summary
-
-    def _turn_plan_text(self, notification: TurnPlanUpdatedNotification) -> str:
-        lines: list[str] = []
-        if notification.explanation:
-            lines.append(notification.explanation)
-        for step in notification.plan:
-            status = getattr(step.status, "value", str(step.status))
-            lines.append(f"- [{status}] {step.step}")
-        return "\n".join(lines)
-
-    def _json_model_text(self, value: object) -> str:
-        dumped = self._json_model_payload(value)
-        return json.dumps(dumped, ensure_ascii=False) if dumped else ""
-
-    def _json_model_payload(self, value: object) -> dict[str, object]:
-        if isinstance(value, BaseModel):
-            return value.model_dump(
-                by_alias=True,
-                exclude_none=True,
-                mode="json",
-                warnings=False,
+    def _configure_codex_home(
+        self, container: Container, container_codex_home: str
+    ) -> None:
+        result = container.exec_run(["cat", f"{container_codex_home}/config.toml"])
+        if result.exit_code != 0:
+            raise RuntimeError(
+                f"Codex home config.toml not found in container; initializing Codex home at {container_codex_home}: {result.output.decode()}"
             )
-        return {}
 
-    def _configure_codex_home(self, container: Any, codex_home: str) -> None:
-        runtime_config = self._read_container_toml(
-            container, f"{codex_home}/config.toml"
-        )
+        config_toml = tomllib.loads(result.output.decode())
 
         self._put_container_files(
             container,
-            codex_home,
+            container_codex_home,
             {
-                "auth.json": self._codex_auth_json_string(),
-                "config.toml": tomli_w.dumps(self._build_codex_config(runtime_config)),
+                "auth.json": self._auth_json_string,
+                "config.toml": tomli_w.dumps(
+                    {
+                        **config_toml,
+                        "model": self._model_name,
+                        **(
+                            {"openai_base_url": self._model_base_url}
+                            if self._model_base_url
+                            else {}
+                        ),
+                    }
+                ),
             },
         )
 
-    def _codex_auth_json_string(self) -> str:
-        auth_json_string = getattr(self, "_auth_json_string", None)
-        if isinstance(auth_json_string, str) and auth_json_string:
-            return auth_json_string
-        model_api_key = getattr(self, "_model_api_key", None)
-        model_organization_id = getattr(self, "_model_organization_id", None)
-        return self._auth_json_from_api_key(
-            model_api_key=model_api_key if isinstance(model_api_key, str) else None,
-            model_organization_id=model_organization_id
-            if isinstance(model_organization_id, str)
-            else None,
-        )
-
-    def _build_codex_config(
-        self, runtime_config: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
-        config = _deep_merge(
-            self._load_container_codex_config(),
-            runtime_config or {},
-        )
-        config["model"] = self._model_name
-        if self._model_base_url:
-            config["openai_base_url"] = self._model_base_url
-        return config
-
-    def _read_container_toml(self, container: Any, path: str) -> dict[str, Any]:
-        output = self._run_container_command(
-            container,
-            ["sh", "-c", f"cat {shlex.quote(path)} 2>/dev/null || true"],
-        )
-        return tomllib.loads(output.decode())
-
     def _put_container_files(
-        self, container: Any, directory: str, files: dict[str, str]
+        self, container: Container, directory: str, files: dict[str, str]
     ) -> None:
-        self._run_container_command(container, ["mkdir", "-p", directory])
+        result = container.exec_run(["mkdir", "-p", directory])
+        if result.exit_code != 0:
+            raise RuntimeError(
+                f"failed to create directory {directory} in container: {result.output.decode()}"
+            )
         archive_buffer = io.BytesIO()
         with tarfile.open(fileobj=archive_buffer, mode="w") as archive:
             for name, content in files.items():
@@ -841,32 +552,113 @@ class CodexAgent(Agent):
                 info.size = len(encoded)
                 archive.addfile(info, io.BytesIO(encoded))
         archive_buffer.seek(0)
-        if not container.put_archive(directory, archive_buffer.getvalue()):
+        if not container.put_archive(directory, archive_buffer.getvalue()):  # pyright: ignore[reportUnknownMemberType]
             raise RuntimeError(f"failed to copy Codex configuration into {directory}")
 
-    def _run_container_command(self, container: Any, command: list[str]) -> bytes:
-        result = container.exec_run(command)
-        exit_code = int(getattr(result, "exit_code", 1))
-        output = getattr(result, "output", b"")
-        if exit_code != 0:
-            text = output.decode() if isinstance(output, bytes) else str(output)
-            raise RuntimeError(f"container command failed: {command!r}: {text}")
-        return output if isinstance(output, bytes) else str(output).encode()
 
-    def _load_container_codex_config(self) -> dict[str, Any]:
-        paths = [
-            f"{self._container_metadata_directory}/.codex/config.toml",
-            "/metadata/.codex/config.toml",
-        ]
-        for path in dict.fromkeys(paths):
-            try:
-                output = self._docker_client.containers.run(
-                    self._docker_image,
-                    command=["cat", path],
-                    remove=True,
+class CodexEventRenderer(EventRenderer[Notification]):
+    def __init__(
+        self,
+        *,
+        model_name: str | None = None,
+        turn_id: str | None = None,
+        challenge_id: str = "",
+    ) -> None:
+        self._model_name = model_name
+        self._challenge_id = challenge_id
+
+    def render(self, event: Event[Notification]) -> Iterator[Component]:
+        match event.raw.payload:
+            case AgentMessageDeltaNotification() as notification:
+                yield Delta(tag="agent", text=notification.delta)
+            case PlanDeltaNotification() as notification:
+                yield Delta(tag="thinking", text=notification.delta)
+            case ReasoningSummaryTextDeltaNotification() as notification:
+                yield Delta(tag="thinking", text=notification.delta)
+            case ReasoningTextDeltaNotification() as notification:
+                yield Delta(tag="thinking", text=notification.delta)
+            case CommandExecutionOutputDeltaNotification() as notification:
+                yield Delta(tag="observation", text=notification.delta)
+            case FileChangeOutputDeltaNotification() as notification:
+                yield Delta(tag="observation", text=notification.delta)
+            case McpToolCallProgressNotification() as notification:
+                yield TextLog(
+                    tag="mcp_tool_call_progress",
+                    text=notification.message,
                 )
-            except DockerException:
-                continue
-            text = output.decode()
-            return tomllib.loads(text)
-        return {}
+
+            case TerminalInteractionNotification() as notification:
+                yield Delta(
+                    tag="tool_input",
+                    text=notification.stdin,
+                )
+
+            case TurnPlanUpdatedNotification() as notification:
+                lines: list[str] = []
+                if notification.explanation:
+                    lines.append(notification.explanation)
+                for step in notification.plan:
+                    status = getattr(step.status, "value", str(step.status))
+                    lines.append(f"- [{status}] {step.step}")
+
+                yield TextLog(tag="turn_plan_updated", text="\n".join(lines))
+            case TurnDiffUpdatedNotification() as notification:
+                yield TextLog(
+                    tag="turn_diff_updated",
+                    text=notification.diff or "",
+                )
+
+            case ThreadTokenUsageUpdatedNotification() as notification:
+                yield TokenUsage(
+                    cached_input_tokens=notification.token_usage.last.cached_input_tokens,
+                    input_tokens=notification.token_usage.last.input_tokens,
+                    output_tokens=notification.token_usage.last.output_tokens,
+                    reasoning_output_tokens=notification.token_usage.last.reasoning_output_tokens,
+                    total_tokens=notification.token_usage.last.total_tokens,
+                )
+
+            case ItemStartedNotification() as notification:
+                yield JsonLog(
+                    tag="item_started",
+                    data=notification.item.root.model_dump(),
+                )
+
+            case ItemCompletedNotification():
+                yield ItemCompleted()
+            case TurnCompletedNotification() as notification:
+                match notification.turn.status:
+                    case TurnStatus.completed:
+                        yield TurnCompleted()
+                    case TurnStatus.failed:
+                        raise RuntimeError(
+                            "Codex turn failed: "
+                            f"{notification.turn.error.message if notification.turn.error else 'unknown error'}"
+                        )
+                    case TurnStatus.interrupted:
+                        raise RuntimeError(
+                            "Codex turn was interrupted: "
+                            f"{notification.turn.error.message if notification.turn.error else 'unknown error'}"
+                        )
+                    case TurnStatus.in_progress:
+                        raise RuntimeError(
+                            "Codex emitted turn/completed while the turn is still in progress"
+                        )
+            case ErrorNotification() as notification if notification.will_retry:
+                yield Nop()
+            case ErrorNotification() as notification:
+                raise RuntimeError(notification.error.message)
+            case ContextCompactedNotification() as notification:
+                yield TextLog(
+                    tag="context_compacted",
+                    text="",
+                )
+
+            case ThreadStartedNotification():
+                yield ThreadStarted()
+            case TurnStartedNotification():
+                yield TurnStarted()
+            case _:
+                _LOGGER.debug(
+                    f"({self._challenge_id}) Unhandled Codex notification type: {type(event.raw.payload).__name__}"
+                )
+                yield Nop()

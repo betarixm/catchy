@@ -480,19 +480,14 @@ class Thread(TimeStampedModel):
 
 class StreamEvent(TimeStampedModel):
     thread = models.ForeignKey(Thread, on_delete=models.CASCADE, related_name="events")
-    sequence = models.PositiveBigIntegerField()
-    dedupe_key = models.CharField(max_length=300)
-    source = models.CharField(max_length=40)
-    kind = models.CharField(max_length=80, blank=True)
-    text = models.TextField(blank=True)
-    raw = models.JSONField(default=dict, blank=True)
+    format = models.CharField(max_length=120, blank=True)
+    raw = models.TextField(blank=True)
 
     class Meta:
-        unique_together = [("thread", "sequence"), ("thread", "dedupe_key")]
-        ordering = ["sequence"]
+        ordering = ["id"]
 
     def __str__(self) -> str:
-        return f"{self.thread_id}:{self.sequence}:{self.kind}"
+        return f"{self.thread_id}:{self.pk}:{self.format}"
 
 
 class SteeringMessage(TimeStampedModel):
