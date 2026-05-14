@@ -22,6 +22,7 @@ from catchy.core.agent.models import (
     TurnCompleted,
     TurnStarted,
 )
+from catchy.core.agent.protocols import HandoffExporter
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import redirect_to_login
@@ -757,6 +758,22 @@ def thread_stream(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     return response
 
 
+def thread_handoff_markdown(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
+    thread = get_object_or_404(
+        Thread.objects.select_related(
+            "ctf", "challenge", "agent", "model", "credential", "credential__provider"
+        ),
+        uuid=thread_uuid,
+    )
+    if not thread.can_view(request.user):
+        if not request.user.is_authenticated:
+            return redirect_to_login(request.get_full_path())
+        raise PermissionDenied
+
+    markdown = _thread_handoff_markdown(thread)
+    return HttpResponse(markdown, content_type="text/plain; charset=utf-8")
+
+
 def thread_filetree(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     thread = get_object_or_404(Thread.objects.select_related("ctf"), uuid=thread_uuid)
     if not thread.can_view(request.user):
@@ -1023,6 +1040,33 @@ def _event_renderer(
     return renderer
 
 
+def _handoff_exporter(
+    event: StreamEvent,
+    *,
+    thread: Thread | None,
+    exporters: dict[str, HandoffExporter[Any]] | None,
+) -> HandoffExporter[Any] | None:
+    if exporters is not None and event.format in exporters:
+        return exporters[event.format]
+    model_name = thread.model.name if thread is not None and thread.model else None
+    try:
+        if event.format == "codex-notification":
+            from catchy.codex import CodexHandoffExporter
+
+            exporter: HandoffExporter[Any] = CodexHandoffExporter(model_name=model_name)
+        elif event.format == "claude-code-message":
+            from catchy.claude_code import ClaudeCodeHandoffExporter
+
+            exporter = ClaudeCodeHandoffExporter(model_name=model_name)
+        else:
+            return None
+    except Exception:
+        return None
+    if exporters is not None:
+        exporters[event.format] = exporter
+    return exporter
+
+
 def _raw_event(event: StreamEvent) -> Event[Any] | None:
     try:
         if event.format == "codex-notification":
@@ -1036,6 +1080,62 @@ def _raw_event(event: StreamEvent) -> Event[Any] | None:
         return None
     except (TypeError, ValueError, json.JSONDecodeError):
         return None
+
+
+def _thread_handoff_markdown(thread: Thread) -> str:
+    lines = [
+        "# Thread Handoff",
+        "",
+        f"- Thread: {thread}",
+        f"- UUID: {thread.uuid}",
+        f"- CTF: {thread.ctf.slug}",
+        f"- Challenge: {thread.challenge.challenge_id}",
+        f"- Agent: {thread.agent.slug}",
+        f"- Model: {thread.model.name if thread.model is not None else 'unknown'}",
+        f"- Status: {thread.status}",
+        "",
+        "## Transcript",
+        "",
+    ]
+
+    exporters: dict[str, HandoffExporter[Any]] = {}
+    for event in thread.events.order_by("id"):
+        event_markdown = _event_handoff_markdown(
+            event,
+            thread=thread,
+            exporters=exporters,
+        )
+        if not event_markdown:
+            continue
+        lines.append(event_markdown.rstrip())
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _event_handoff_markdown(
+    event: StreamEvent,
+    *,
+    thread: Thread,
+    exporters: dict[str, HandoffExporter[Any]] | None = None,
+) -> str:
+    if event.format == APP_EVENT_FORMAT:
+        return _app_event_handoff_markdown(event)
+    exporter = _handoff_exporter(event, thread=thread, exporters=exporters)
+    raw_event = _raw_event(event)
+    if exporter is None or raw_event is None:
+        return ""
+    return exporter.export(raw_event)
+
+
+def _app_event_handoff_markdown(event: StreamEvent) -> str:
+    payload = _app_event_payload(event)
+    source = str(payload.get("source") or "")
+    kind = str(payload.get("kind") or "")
+    text = str(payload.get("text") or "")
+    if source == "user" and kind in {"prompt", "steer"} and text:
+        return f"- **User:** {text.strip()}\n"
+    if kind in {"thread.failed", "thread.completed", "thread.stopped"} and text:
+        return f"- **System:** {text.strip()}\n"
+    return ""
 
 
 def _component_payload(

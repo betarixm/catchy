@@ -1439,6 +1439,48 @@ class PublicThreadAccessTests(TestCase):
         self.assertNotContains(response, "Fork")
         self.assertNotContains(response, 'id="steer-form"')
 
+    def test_thread_detail_shows_handoff_export_button(self) -> None:
+        thread = self._create_thread("handoff-export-button", is_public=True)
+
+        response = self.client.get(thread.get_absolute_url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Export handoff (.md)")
+        self.assertContains(
+            response,
+            reverse("ctf:thread_handoff_markdown", kwargs={"thread_uuid": thread.uuid}),
+        )
+
+    def test_thread_handoff_markdown_exports_raw_markdown(self) -> None:
+        thread = self._create_thread("handoff-export", is_public=True)
+        self._create_stream_event(
+            thread=thread,
+            source="user",
+            kind="prompt",
+            text="Please continue from the last checkpoint.",
+            raw={"steering_message_id": 42},
+        )
+        self._create_stream_event(
+            thread=thread,
+            source="system",
+            kind="thread.failed",
+            text="Execution failed: timeout",
+        )
+
+        response = self.client.get(
+            reverse("ctf:thread_handoff_markdown", kwargs={"thread_uuid": thread.uuid})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response["Content-Type"].startswith("text/plain"))
+        body = response.content.decode()
+        self.assertIn("# Thread Handoff", body)
+        self.assertIn("## Transcript", body)
+        self.assertIn("- **User:** Please continue from the last checkpoint.", body)
+        self.assertIn("- **System:** Execution failed: timeout", body)
+        self.assertNotIn("## Event", body)
+        self.assertNotIn('"steering_message_id"', body)
+
     def test_thread_detail_hides_credential_name_without_credential_access(
         self,
     ) -> None:

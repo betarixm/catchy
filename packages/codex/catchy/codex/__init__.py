@@ -28,7 +28,7 @@ from catchy.core.agent.models import (
     TurnCompleted,
     TurnStarted,
 )
-from catchy.core.agent.protocols import Agent
+from catchy.core.agent.protocols import Agent, HandoffExporter
 from catchy.core.challenge.models import Challenge
 from catchy.core.webhook.models import Webhook
 from codex_app_server import (
@@ -666,3 +666,37 @@ class CodexEventRenderer(EventRenderer[Notification]):
                     f"({self._challenge_id}) Unhandled Codex notification type: {type(event.raw.payload).__name__}"
                 )
                 yield Nop()
+
+
+class CodexHandoffExporter(HandoffExporter[Notification]):
+    def __init__(self, *, model_name: str | None = None) -> None:
+        self._renderer = CodexEventRenderer(model_name=model_name)
+
+    def export(self, event: Event[Notification]) -> str:
+        chunks: list[str] = []
+        for component in self._renderer.render(event):
+            markdown = self._component_markdown(component)
+            if markdown:
+                chunks.append(markdown)
+        return "".join(chunks)
+
+    def _component_markdown(self, component: Component) -> str:
+        match component:
+            case Delta() as delta:
+                if not delta.text.strip():
+                    return ""
+                label = self._delta_label(delta.tag)
+                if label is None:
+                    return ""
+                return f"- **{label}:** {delta.text.strip()}\n"
+            case TextLog() | JsonLog() | TokenUsage() | ItemCompleted() | TurnStarted() | TurnCompleted() | ThreadStarted():
+                return ""
+            case Nop():
+                return ""
+        return ""
+
+    def _delta_label(self, tag: str) -> str | None:
+        return {
+            "agent": "Assistant",
+            "user": "User",
+        }.get(tag)

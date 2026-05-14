@@ -52,6 +52,7 @@
       </div>
     </div>
     <div class="actions">
+      <a class="btn" href="{% url 'ctf:thread_handoff_markdown' thread.uuid %}" target="_blank" rel="noopener">Export handoff (.md)</a>
       {% if can_manage_thread %}
         <form action="{% url 'ctf:thread_publish' thread.uuid %}" method="post" style="margin: 0;">
           {% csrf_token %}

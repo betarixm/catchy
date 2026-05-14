@@ -18,3 +18,7 @@ class Agent[T](ABC):
         webhook: Webhook | None = None,
         additional_prompt: str | None = None,
     ) -> AsyncGenerator[Event[T], Interrupt]: ...
+
+
+class HandoffExporter[T](ABC):
+    def export(self, event: Event[T]) -> str: ...

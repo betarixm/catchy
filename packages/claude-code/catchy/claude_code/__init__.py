@@ -25,11 +25,12 @@ from catchy.core.agent.models import (
     Steer,
     Stop,
     TextLog,
+    ThreadStarted,
     TokenUsage,
     TurnCompleted,
     TurnStarted,
 )
-from catchy.core.agent.protocols import Agent
+from catchy.core.agent.protocols import Agent, HandoffExporter
 from catchy.core.challenge.models import Challenge
 from catchy.core.webhook.models import Webhook
 from claude_agent_sdk import (
@@ -870,3 +871,37 @@ class ClaudeCodeEventRenderer(EventRenderer[Message]):
                     f"({self._challenge_id}) Unhandled Claude Code content block type: {type(content_block).__name__}"
                 )
                 return Nop()
+
+
+class ClaudeCodeHandoffExporter(HandoffExporter[Message]):
+    def __init__(self, *, model_name: str | None = None) -> None:
+        self._renderer = ClaudeCodeEventRenderer(model_name=model_name)
+
+    def export(self, event: Event[Message]) -> str:
+        chunks: list[str] = []
+        for component in self._renderer.render(event):
+            markdown = self._component_markdown(component)
+            if markdown:
+                chunks.append(markdown)
+        return "".join(chunks)
+
+    def _component_markdown(self, component: Component) -> str:
+        match component:
+            case Delta() as delta:
+                if not delta.text.strip():
+                    return ""
+                label = self._delta_label(delta.tag)
+                if label is None:
+                    return ""
+                return f"- **{label}:** {delta.text.strip()}\n"
+            case TextLog() | JsonLog() | TokenUsage() | ItemCompleted() | TurnStarted() | TurnCompleted() | ThreadStarted():
+                return ""
+            case Nop():
+                return ""
+        return ""
+
+    def _delta_label(self, tag: str) -> str | None:
+        return {
+            "agent": "Assistant",
+            "user": "User",
+        }.get(tag)

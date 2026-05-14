@@ -68,6 +68,11 @@ urlpatterns = [
         name="thread_stream",
     ),
     path(
+        "threads/<uuid:thread_uuid>/handoff.md",
+        views.thread_handoff_markdown,
+        name="thread_handoff_markdown",
+    ),
+    path(
         "threads/<uuid:thread_uuid>/filetree/",
         views.thread_filetree,
         name="thread_filetree",
