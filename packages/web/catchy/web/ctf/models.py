@@ -297,6 +297,62 @@ class AgentConfiguration(TimeStampedModel):
         return {str(key): value for key, value in data.items()}
 
 
+class FlowConfiguration(TimeStampedModel):
+    name = models.CharField(max_length=200)
+    slug = models.SlugField(unique=True)
+    yaml = models.TextField()
+    view_groups = models.ManyToManyField(
+        Group, blank=True, related_name="viewable_flow_configurations"
+    )
+    use_groups = models.ManyToManyField(
+        Group, blank=True, related_name="usable_flow_configurations"
+    )
+    created_by = models.ForeignKey(
+        django_settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_flow_configurations",
+    )
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self) -> str:
+        return self.name
+
+    def get_absolute_url(self) -> str:
+        return reverse("ctf:flow_detail", kwargs={"slug": self.slug})
+
+    def can_view(self, user: AbstractUser) -> bool:
+        return _can_access_grouped_object(user, self.view_groups)
+
+    def can_use(self, user: AbstractUser) -> bool:
+        return _can_access_grouped_object(user, self.use_groups)
+
+    def resolved_yaml(self, *, user: Any | None = None) -> str:
+        register_credential_resolver()
+        config = OmegaConf.create(self.yaml)
+        with resolve_credentials_as(user):
+            try:
+                return OmegaConf.to_yaml(config, resolve=True)
+            except InterpolationResolutionError as exc:
+                _raise_permission_denied_from_interpolation(exc)
+                raise
+
+    def resolved_mapping(self, *, user: Any | None = None) -> dict[str, Any]:
+        register_credential_resolver()
+        with resolve_credentials_as(user):
+            try:
+                data = OmegaConf.to_container(OmegaConf.create(self.yaml), resolve=True)
+            except InterpolationResolutionError as exc:
+                _raise_permission_denied_from_interpolation(exc)
+                raise
+        if not isinstance(data, dict):
+            raise ValueError("flow YAML must resolve to a mapping")
+        return {str(key): value for key, value in data.items()}
+
+
 class Ctf(TimeStampedModel):
     title = models.CharField(max_length=200)
     slug = models.SlugField(unique=True)
@@ -412,7 +468,18 @@ class Thread(TimeStampedModel):
         Challenge, on_delete=models.PROTECT, related_name="threads"
     )
     agent = models.ForeignKey(
-        AgentConfiguration, on_delete=models.PROTECT, related_name="threads"
+        AgentConfiguration,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="threads",
+    )
+    flow = models.ForeignKey(
+        FlowConfiguration,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="threads",
     )
     model = models.ForeignKey(
         ModelConfiguration,

@@ -5,6 +5,7 @@ from .models import (
     Challenge,
     Credential,
     Ctf,
+    FlowConfiguration,
     ModelConfiguration,
     ModelPricing,
     Provider,
@@ -57,6 +58,13 @@ class AgentConfigurationAdmin(admin.ModelAdmin):
     filter_horizontal = ["view_groups", "use_groups"]
 
 
+@admin.register(FlowConfiguration)
+class FlowConfigurationAdmin(admin.ModelAdmin):
+    list_display = ["name", "slug", "created_at"]
+    search_fields = ["name", "slug"]
+    filter_horizontal = ["view_groups", "use_groups"]
+
+
 @admin.register(Ctf)
 class CtfAdmin(admin.ModelAdmin):
     list_display = ["title", "slug", "created_at"]
@@ -79,12 +87,13 @@ class ThreadAdmin(admin.ModelAdmin):
         "ctf",
         "challenge",
         "agent",
+        "flow",
         "model",
         "credential",
         "status",
         "is_public",
     ]
-    list_filter = ["status", "is_public", "ctf", "agent", "model", "credential"]
+    list_filter = ["status", "is_public", "ctf", "agent", "flow", "model", "credential"]
     search_fields = ["uuid", "name", "challenge__challenge_id", "ctf__title"]
 
 

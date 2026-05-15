@@ -7,7 +7,9 @@ from urllib.parse import urlparse
 from django import forms
 from django.core.files import File
 from django.core.files.uploadedfile import UploadedFile
+from django.db import models
 from django.utils.text import slugify
+from catchy.core.flow.services import FlowConfiguration as CoreFlowConfiguration
 from omegaconf import OmegaConf
 
 from .models import (
@@ -15,11 +17,13 @@ from .models import (
     Challenge,
     Credential,
     Ctf,
+    FlowConfiguration,
     ModelConfiguration,
     ModelPricing,
     Provider,
 )
 from .pricing import PRICING_PRESET_BY_KEY, PRICING_PRESETS
+from .services import normalize_flow_runtime_mapping
 from .source_archives import (
     SOURCE_ARCHIVE_FORMAT_HINT,
     DownloadedSourceArchive,
@@ -209,6 +213,298 @@ class AgentConfigurationForm(forms.ModelForm):
         return yaml
 
 
+class FlowConfigurationForm(forms.ModelForm):
+    graph_payload = forms.CharField(required=False, widget=forms.HiddenInput())
+
+    class Meta:
+        model = FlowConfiguration
+        fields = ["name", "slug", "yaml", "view_groups", "use_groups", "graph_payload"]
+        widgets = {"yaml": forms.HiddenInput()}
+
+    def __init__(self, *args: Any, user=None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.user = user
+        self.fields["yaml"].required = False
+        self.fields["graph_payload"].required = False
+
+        self._usable_agents = [
+            agent
+            for agent in AgentConfiguration.objects.prefetch_related("use_groups")
+            if user is None or agent.can_use(user)
+        ]
+        self._usable_credentials = [
+            credential
+            for credential in Credential.objects.prefetch_related(
+                "allowed_groups", "allowed_users", "provider"
+            )
+            if user is None or credential.can_use(user)
+        ]
+        self._usable_models = [
+            model
+            for model in ModelConfiguration.objects.prefetch_related("use_groups")
+            if user is None or model.can_use(user)
+        ]
+        self.editor_agents = [
+            {"id": agent.pk, "name": agent.name, "slug": agent.slug}
+            for agent in self._usable_agents
+        ]
+        self.editor_models = [
+            {"id": model.pk, "name": model.name, "slug": model.slug}
+            for model in self._usable_models
+        ]
+        self.editor_credentials = [
+            {
+                "id": credential.pk,
+                "name": credential.name,
+                "kind": credential.kind,
+                "provider": (
+                    credential.provider.name if credential.provider_id else credential.kind
+                ),
+            }
+            for credential in self._usable_credentials
+        ]
+        self._default_agent_id = (
+            str(self._usable_agents[0].pk) if self._usable_agents else ""
+        )
+        self._default_model_id = (
+            str(self._usable_models[0].pk) if self._usable_models else ""
+        )
+        self._default_credential_id = (
+            str(self._usable_credentials[0].pk) if self._usable_credentials else ""
+        )
+        self.editor_initial_graph = self._initial_editor_graph()
+
+    def clean(self) -> dict[str, Any]:
+        cleaned = super().clean()
+        graph_payload = str(cleaned.get("graph_payload") or "").strip()
+        yaml = str(cleaned.get("yaml") or "")
+
+        if graph_payload:
+            graph_mapping = self._graph_mapping_from_payload(graph_payload)
+            try:
+                runtime_mapping = normalize_flow_runtime_mapping(
+                    graph_mapping,
+                    user=self.user,
+                )
+                CoreFlowConfiguration.model_validate(runtime_mapping)
+            except Exception as exc:
+                self.add_error("graph_payload", f"invalid flow graph: {exc}")
+                return cleaned
+            cleaned["yaml"] = OmegaConf.to_yaml(OmegaConf.create(graph_mapping))
+            return cleaned
+
+        if not yaml.strip():
+            self.add_error("graph_payload", "Add at least one flow node.")
+            return cleaned
+
+        try:
+            mapping = FlowConfiguration(yaml=yaml).resolved_mapping(user=self.user)
+            runtime_mapping = normalize_flow_runtime_mapping(mapping, user=self.user)
+            CoreFlowConfiguration.model_validate(runtime_mapping)
+        except Exception as exc:
+            self.add_error("yaml", f"invalid flow YAML: {exc}")
+            return cleaned
+        return cleaned
+
+    def _initial_editor_graph(self) -> dict[str, Any]:
+        if self.is_bound:
+            bound_payload = str(self.data.get(self.add_prefix("graph_payload"), "")).strip()
+            if bound_payload:
+                try:
+                    return self._graph_mapping_from_payload(bound_payload)
+                except forms.ValidationError:
+                    pass
+        if self.instance.pk:
+            try:
+                return self._graph_mapping_from_yaml(self.instance.yaml)
+            except forms.ValidationError:
+                pass
+        return {
+            "nodes": [
+                {
+                    "id": "node-1",
+                    "agent_id": self._default_agent_id,
+                    "model_id": self._default_model_id,
+                    "credential_id": self._default_credential_id,
+                    "prompt": "",
+                    "x": 280,
+                    "y": 170,
+                }
+            ],
+            "edges": [
+                {"source": "__start__", "target": "node-1"},
+                {"source": "node-1", "target": "__end__"},
+            ],
+        }
+
+    def _graph_mapping_from_yaml(self, yaml: str) -> dict[str, Any]:
+        try:
+            parsed = OmegaConf.to_container(OmegaConf.create(yaml), resolve=False)
+        except Exception as exc:
+            raise forms.ValidationError(f"invalid YAML: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise forms.ValidationError("flow YAML must be a mapping")
+        if "nodes" in parsed and "edges" in parsed:
+            return self._graph_mapping_from_payload(json.dumps(parsed))
+        if "agents" in parsed and "edges" in parsed:
+            nodes: list[dict[str, Any]] = []
+            for index, item in enumerate(parsed.get("agents") or [], start=1):
+                if not isinstance(item, dict):
+                    continue
+                node_id = str(item.get("id") or f"node-{index}")
+                prompt = item.get("prompt")
+                prompt_text = ""
+                if isinstance(prompt, dict):
+                    prompt_text = str(prompt.get("user") or "")
+                elif isinstance(prompt, str):
+                    prompt_text = prompt
+                nodes.append(
+                    {
+                        "id": node_id,
+                        "agent_id": self._default_agent_id,
+                        "model_id": self._default_model_id,
+                        "credential_id": self._default_credential_id,
+                        "prompt": prompt_text,
+                        "x": 220 + (index - 1) * 180,
+                        "y": 170,
+                    }
+                )
+            edges: list[dict[str, str]] = []
+            for edge in parsed.get("edges") or []:
+                if isinstance(edge, (list, tuple)) and len(edge) == 2:
+                    source = str(edge[0] or "")
+                    target = str(edge[1] or "")
+                elif isinstance(edge, dict):
+                    source = str(edge.get("source") or "")
+                    target = str(edge.get("target") or "")
+                else:
+                    continue
+                if source and target:
+                    edges.append({"source": source, "target": target})
+            return self._graph_mapping_from_payload(json.dumps({"nodes": nodes, "edges": edges}))
+        raise forms.ValidationError("flow YAML must contain agents/edges or nodes/edges")
+
+    def _graph_mapping_from_payload(self, payload: str) -> dict[str, Any]:
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise forms.ValidationError("editor payload is not valid JSON") from exc
+        if not isinstance(data, dict):
+            raise forms.ValidationError("editor payload must be an object")
+        nodes_raw = data.get("nodes")
+        edges_raw = data.get("edges")
+        if not isinstance(nodes_raw, list) or not nodes_raw:
+            raise forms.ValidationError("editor requires at least one node")
+        if not isinstance(edges_raw, list) or not edges_raw:
+            raise forms.ValidationError("editor requires at least one edge")
+
+        usable_agent_ids = {agent.pk for agent in self._usable_agents}
+        usable_model_ids = {model.pk for model in self._usable_models}
+        usable_credential_ids = {credential.pk for credential in self._usable_credentials}
+        nodes: list[dict[str, Any]] = []
+        node_ids: set[str] = set()
+        for item in nodes_raw:
+            if not isinstance(item, dict):
+                raise forms.ValidationError("each node must be an object")
+            node_id = str(item.get("id") or item.get("name") or "").strip()
+            if not node_id:
+                raise forms.ValidationError("each node must have an id")
+            if node_id in {"__start__", "__end__"}:
+                raise forms.ValidationError("node id cannot be __start__ or __end__")
+            if node_id in node_ids:
+                raise forms.ValidationError(f"duplicate node id: {node_id}")
+            if slugify(node_id).replace("-", "_") != node_id.replace("-", "_"):
+                raise forms.ValidationError(
+                    f"invalid node id '{node_id}' (use letters, numbers, _, -, .)"
+                )
+            node_ids.add(node_id)
+
+            agent_id_raw = item.get("agent_id", item.get("agent"))
+            try:
+                agent_id = int(agent_id_raw)
+            except (TypeError, ValueError) as exc:
+                raise forms.ValidationError(
+                    f"node '{node_id}' must select an agent"
+                ) from exc
+            if agent_id not in usable_agent_ids:
+                raise forms.ValidationError(f"node '{node_id}' selected inaccessible agent")
+
+            model_id_raw = item.get("model_id", item.get("model"))
+            try:
+                model_id = int(model_id_raw)
+            except (TypeError, ValueError) as exc:
+                raise forms.ValidationError(
+                    f"node '{node_id}' must select a model"
+                ) from exc
+            if model_id not in usable_model_ids:
+                raise forms.ValidationError(f"node '{node_id}' selected inaccessible model")
+
+            credential_id_raw = item.get("credential_id", item.get("credential"))
+            try:
+                credential_id = int(credential_id_raw)
+            except (TypeError, ValueError) as exc:
+                raise forms.ValidationError(
+                    f"node '{node_id}' must select a credential"
+                ) from exc
+            if credential_id not in usable_credential_ids:
+                raise forms.ValidationError(
+                    f"node '{node_id}' selected inaccessible credential"
+                )
+
+            prompt = str(item.get("prompt") or "")
+            x = _coerce_int(item.get("x"), default=320)
+            y = _coerce_int(item.get("y"), default=160)
+            nodes.append(
+                {
+                    "name": node_id,
+                    "agent": agent_id,
+                    "model": model_id,
+                    "credential": credential_id,
+                    "prompt": prompt,
+                    "x": x,
+                    "y": y,
+                }
+            )
+
+        edges: list[dict[str, str]] = []
+        seen_edges: set[tuple[str, str]] = set()
+        has_start = False
+        has_end = False
+        for edge in edges_raw:
+            if isinstance(edge, dict):
+                source = str(edge.get("source") or "").strip()
+                target = str(edge.get("target") or "").strip()
+            elif isinstance(edge, (list, tuple)) and len(edge) == 2:
+                source = str(edge[0] or "").strip()
+                target = str(edge[1] or "").strip()
+            else:
+                raise forms.ValidationError("each edge must define source and target")
+            if not source or not target:
+                raise forms.ValidationError("each edge must define source and target")
+            if source == "__end__":
+                raise forms.ValidationError("__end__ cannot be an edge source")
+            if target == "__start__":
+                raise forms.ValidationError("__start__ cannot be an edge target")
+            if source != "__start__" and source not in node_ids:
+                raise forms.ValidationError(f"unknown edge source: {source}")
+            if target != "__end__" and target not in node_ids:
+                raise forms.ValidationError(f"unknown edge target: {target}")
+            pair = (source, target)
+            if pair in seen_edges:
+                continue
+            seen_edges.add(pair)
+            edges.append({"source": source, "target": target})
+            has_start = has_start or source == "__start__"
+            has_end = has_end or target == "__end__"
+
+        if not has_start:
+            raise forms.ValidationError("add at least one edge from __start__")
+        if not has_end:
+            raise forms.ValidationError("add at least one edge to __end__")
+        _validate_flow_connectivity(node_ids=node_ids, edges=edges)
+        return {"nodes": nodes, "edges": edges, "merge": {"strategy": "concat", "separator": "\n\n"}}
+
+
 class CtfForm(forms.ModelForm):
     settings_yaml = forms.CharField(
         required=False,
@@ -271,7 +567,7 @@ class ChallengeForm(forms.ModelForm):
     webhook_preferred_language = forms.CharField(
         required=False,
         label="Preferred language",
-        help_text="Spoken language the agent should respond in (e.g. English, 한국어). Optional.",
+        help_text="Spoken language the agent should respond in (e.g. English, Korean). Optional.",
         widget=forms.TextInput(attrs={"placeholder": "English"}),
     )
     clear_webhook = forms.BooleanField(
@@ -452,14 +748,30 @@ class ChallengeForm(forms.ModelForm):
 
 
 class ThreadCreateForm(forms.Form):
+    class Runtime(models.TextChoices):
+        AGENT = "agent", "Agent"
+        FLOW = "flow", "Flow"
+
     name = forms.CharField(
         max_length=80,
         required=False,
         widget=forms.TextInput(attrs={"placeholder": "bright-cipher-0427"}),
     )
-    agent = forms.ModelChoiceField(queryset=AgentConfiguration.objects.none())
-    model = forms.ModelChoiceField(queryset=ModelConfiguration.objects.none())
-    credential = forms.ModelChoiceField(queryset=Credential.objects.none())
+    runtime = forms.ChoiceField(
+        choices=Runtime.choices,
+        initial=Runtime.AGENT,
+        required=False,
+    )
+    agent = forms.ModelChoiceField(
+        queryset=AgentConfiguration.objects.none(),
+        required=False,
+    )
+    flow = forms.ModelChoiceField(
+        queryset=FlowConfiguration.objects.none(),
+        required=False,
+    )
+    model = forms.ModelChoiceField(queryset=ModelConfiguration.objects.none(), required=False)
+    credential = forms.ModelChoiceField(queryset=Credential.objects.none(), required=False)
 
     def __init__(
         self,
@@ -476,6 +788,12 @@ class ThreadCreateForm(forms.Form):
         self.fields["agent"].queryset = AgentConfiguration.objects.filter(
             pk__in=agent_ids
         )
+        flow_ids = [
+            flow.pk
+            for flow in FlowConfiguration.objects.prefetch_related("use_groups")
+            if flow.can_use(user)
+        ]
+        self.fields["flow"].queryset = FlowConfiguration.objects.filter(pk__in=flow_ids)
         model_ids = [
             model.pk
             for model in ModelConfiguration.objects.prefetch_related("use_groups")
@@ -504,6 +822,30 @@ class ThreadCreateForm(forms.Form):
             raise forms.ValidationError("Enter a name with letters or numbers.")
         return name
 
+    def clean(self) -> dict[str, Any]:
+        cleaned = super().clean()
+        runtime = str(cleaned.get("runtime") or self.Runtime.AGENT)
+        cleaned["runtime"] = runtime
+        agent = cleaned.get("agent")
+        flow = cleaned.get("flow")
+        model = cleaned.get("model")
+        credential = cleaned.get("credential")
+        if runtime == self.Runtime.FLOW:
+            cleaned["agent"] = None
+            cleaned["model"] = None
+            cleaned["credential"] = None
+            if flow is None:
+                self.add_error("flow", "Select a flow.")
+        else:
+            cleaned["flow"] = None
+            if agent is None:
+                self.add_error("agent", "Select an agent.")
+            if model is None:
+                self.add_error("model", "Select a model.")
+            if credential is None:
+                self.add_error("credential", "Select a credential.")
+        return cleaned
+
 
 def _clean_yaml_mapping(value: str) -> dict[str, Any]:
     if not value.strip():
@@ -515,6 +857,61 @@ def _clean_yaml_mapping(value: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise forms.ValidationError("YAML value must be a mapping")
     return {str(key): item for key, item in data.items()}
+
+
+def _coerce_int(value: Any, *, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _validate_flow_connectivity(
+    *,
+    node_ids: set[str],
+    edges: list[dict[str, str]],
+) -> None:
+    outgoing: dict[str, list[str]] = {node_id: [] for node_id in node_ids}
+    incoming: dict[str, list[str]] = {node_id: [] for node_id in node_ids}
+    for edge in edges:
+        source = edge["source"]
+        target = edge["target"]
+        if source in outgoing and target in node_ids:
+            outgoing[source].append(target)
+            incoming[target].append(source)
+        if source == "__start__" and target in node_ids:
+            incoming[target].append("__start__")
+        if target == "__end__" and source in node_ids:
+            outgoing[source].append("__end__")
+
+    reachable_from_start: set[str] = set()
+    stack = [edge["target"] for edge in edges if edge["source"] == "__start__"]
+    while stack:
+        current = stack.pop()
+        if current in reachable_from_start or current not in node_ids:
+            continue
+        reachable_from_start.add(current)
+        stack.extend(outgoing[current])
+
+    can_reach_end: set[str] = set()
+    reverse_stack = [edge["source"] for edge in edges if edge["target"] == "__end__"]
+    while reverse_stack:
+        current = reverse_stack.pop()
+        if current in can_reach_end or current not in node_ids:
+            continue
+        can_reach_end.add(current)
+        reverse_stack.extend(incoming[current])
+
+    unreachable = sorted(node_ids - reachable_from_start)
+    if unreachable:
+        raise forms.ValidationError(
+            f"nodes not reachable from __start__: {', '.join(unreachable)}"
+        )
+    no_end_path = sorted(node_ids - can_reach_end)
+    if no_end_path:
+        raise forms.ValidationError(
+            f"nodes that cannot reach __end__: {', '.join(no_end_path)}"
+        )
 
 
 def _safe_yaml_mapping(value: str) -> dict[str, Any]:

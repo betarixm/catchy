@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import re
 import shutil
 import threading
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 from asgiref.sync import sync_to_async
 from catchy.core.agent.models import (
@@ -23,6 +24,10 @@ from catchy.core.agent.models import (
 )
 from catchy.core.agent.protocols import Agent
 from catchy.core.challenge.models import Challenge as CoreChallenge
+from catchy.core.flow.services import (
+    Flow as CoreFlow,
+    FlowConfiguration as CoreFlowConfiguration,
+)
 from catchy.core.webhook.models import Webhook
 from django.conf import settings
 from django.core.exceptions import PermissionDenied
@@ -33,6 +38,7 @@ from watchdog.observers import Observer
 from .models import (
     AgentConfiguration,
     Credential,
+    FlowConfiguration,
     ModelConfiguration,
     ModelPricing,
     SteeringMessage,
@@ -131,6 +137,7 @@ def fork_thread(thread: Thread, *, user: Any | None = None) -> Thread:
         ctf=thread.ctf,
         challenge=thread.challenge,
         agent=thread.agent,
+        flow=thread.flow,
         model=thread.model,
         credential=thread.credential,
         created_by=user or thread.created_by,
@@ -195,12 +202,14 @@ def run_thread_sync(thread_id: int) -> None:
             "challenge",
             "challenge__ctf",
             "agent",
+            "flow",
             "model",
             "credential",
         )
         .select_related("created_by")
         .prefetch_related(
             "agent__use_groups",
+            "flow__use_groups",
             "model__use_groups",
             "credential__allowed_groups",
             "credential__allowed_users",
@@ -236,12 +245,6 @@ def run_thread_sync(thread_id: int) -> None:
 
     observer = _start_workspace_observer(thread.pk, workspace)
     try:
-        agent = load_agent(
-            thread.agent,
-            model_configuration=thread.model,
-            credential=thread.credential,
-            user=thread.created_by,
-        )
         core_challenge = CoreChallenge(
             id=thread.challenge.challenge_id,
             description=thread.challenge.description,
@@ -249,18 +252,46 @@ def run_thread_sync(thread_id: int) -> None:
         )
         webhook_data = thread.challenge.webhook_mapping()
         webhook = Webhook(**webhook_data) if webhook_data else None
-        terminal_status = asyncio.run(
-            _run_agent_stream(
-                thread_id=thread.pk,
-                agent=agent,
-                challenge=core_challenge,
-                workspace=workspace,
-                metadata=metadata,
-                webhook=webhook,
-                model_name=_thread_model_name(thread),
-                ctf_prompt=thread.ctf.prompt,
+        if thread.flow_id is not None:
+            flow = load_flow(
+                thread.flow,
+                model_configuration=thread.model,
+                credential=thread.credential,
+                user=thread.created_by,
             )
-        )
+            terminal_status = asyncio.run(
+                _run_flow_stream(
+                    thread_id=thread.pk,
+                    flow=flow,
+                    challenge=core_challenge,
+                    workspace=workspace,
+                    metadata=metadata,
+                    webhook=webhook,
+                    model_name=_thread_model_name(thread),
+                    ctf_prompt=thread.ctf.prompt,
+                )
+            )
+        else:
+            if thread.agent is None:
+                raise ValueError("thread must have either flow or agent configuration")
+            agent = load_agent(
+                thread.agent,
+                model_configuration=thread.model,
+                credential=thread.credential,
+                user=thread.created_by,
+            )
+            terminal_status = asyncio.run(
+                _run_agent_stream(
+                    thread_id=thread.pk,
+                    agent=agent,
+                    challenge=core_challenge,
+                    workspace=workspace,
+                    metadata=metadata,
+                    webhook=webhook,
+                    model_name=_thread_model_name(thread),
+                    ctf_prompt=thread.ctf.prompt,
+                )
+            )
     except Exception as exc:
         observer.stop()
         observer.join()
@@ -300,6 +331,26 @@ def load_agent(
         credential=credential,
         user=user,
     )
+    return _agent_from_data(data)
+
+
+def load_flow(
+    flow_configuration: FlowConfiguration,
+    *,
+    model_configuration: ModelConfiguration | None = None,
+    credential: Credential | None = None,
+    user: Any | None = None,
+) -> CoreFlow:
+    data = build_flow_configuration(
+        flow_configuration,
+        model_configuration=model_configuration,
+        credential=credential,
+        user=user,
+    )
+    return CoreFlow.from_configuration(CoreFlowConfiguration.model_validate(data))
+
+
+def _agent_from_data(data: dict[str, Any]) -> Agent[Any]:
     class_path = _agent_class_path(data)
     agent_class = _import_agent_class(class_path)
     configuration_class = getattr(
@@ -333,6 +384,269 @@ def build_agent_configuration(
         raise PermissionDenied("agent configuration is not accessible")
 
     data = dict(agent_configuration.resolved_mapping(user=user))
+    return _apply_model_and_credential_overrides(
+        data,
+        model_configuration=model_configuration,
+        credential=credential,
+        user=user,
+    )
+
+
+def build_flow_configuration(
+    flow_configuration: FlowConfiguration,
+    *,
+    model_configuration: ModelConfiguration | None = None,
+    credential: Credential | None = None,
+    user: Any | None = None,
+) -> dict[str, Any]:
+    if user is not None and not flow_configuration.can_use(user):
+        raise PermissionDenied("flow configuration is not accessible")
+    raw = dict(flow_configuration.resolved_mapping(user=user))
+    normalized = normalize_flow_runtime_mapping(raw, user=user)
+    validated = CoreFlowConfiguration.model_validate(normalized)
+    agents: list[dict[str, Any]] = []
+    for item in validated.agents:
+        data = _apply_model_and_credential_overrides(
+            dict(item),
+            model_configuration=model_configuration,
+            credential=credential,
+            user=user,
+        )
+        agents.append(data)
+    return {
+        "agents": agents,
+        "edges": [tuple(edge) for edge in validated.edges],
+    }
+
+
+def normalize_flow_runtime_mapping(
+    raw: dict[str, Any],
+    *,
+    user: Any | None = None,
+) -> dict[str, Any]:
+    if "agents" in raw and "edges" in raw:
+        return {
+            "agents": list(cast(list[dict[str, Any]], raw.get("agents") or [])),
+            "edges": _coerce_flow_edges(raw.get("edges")),
+        }
+    if "nodes" in raw and "edges" in raw:
+        return _flow_graph_mapping_to_runtime(raw, user=user)
+    raise ValueError("flow YAML must contain either agents/edges or nodes/edges")
+
+
+def _flow_graph_mapping_to_runtime(
+    raw: dict[str, Any],
+    *,
+    user: Any | None = None,
+) -> dict[str, Any]:
+    nodes_raw = raw.get("nodes")
+    if not isinstance(nodes_raw, list) or not nodes_raw:
+        raise ValueError("flow nodes must be a non-empty list")
+
+    nodes: list[dict[str, Any]] = []
+    node_ids: set[str] = set()
+    agent_ids: set[int] = set()
+    model_ids: set[int] = set()
+    credential_ids: set[int] = set()
+
+    for item in nodes_raw:
+        if not isinstance(item, dict):
+            raise ValueError("each flow node must be a mapping")
+        node_id = str(item.get("id") or item.get("name") or "").strip()
+        if not node_id:
+            raise ValueError("each flow node must define id or name")
+        if node_id in {"__start__", "__end__"}:
+            raise ValueError("flow node id cannot be __start__ or __end__")
+        if node_id in node_ids:
+            raise ValueError(f"duplicate flow node id: {node_id}")
+        node_ids.add(node_id)
+
+        try:
+            agent_id = int(item.get("agent"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"flow node {node_id} has invalid agent id") from exc
+        if agent_id <= 0:
+            raise ValueError(f"flow node {node_id} has invalid agent id")
+        agent_ids.add(agent_id)
+
+        model_id_raw = item.get("model_id", item.get("model"))
+        try:
+            model_id = int(model_id_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"flow node {node_id} has invalid model id") from exc
+        if model_id <= 0:
+            raise ValueError(f"flow node {node_id} has invalid model id")
+        model_ids.add(model_id)
+
+        credential_id_raw = item.get("credential")
+        credential_id: int | None = None
+        if credential_id_raw not in (None, ""):
+            try:
+                credential_id = int(credential_id_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"flow node {node_id} has invalid credential id"
+                ) from exc
+            if credential_id <= 0:
+                raise ValueError(f"flow node {node_id} has invalid credential id")
+            credential_ids.add(credential_id)
+
+        prompt = str(item.get("prompt") or "")
+        nodes.append(
+            {
+                "id": node_id,
+                "agent_id": agent_id,
+                "model_id": model_id,
+                "credential_id": credential_id,
+                "prompt": prompt,
+            }
+        )
+
+    edges = _coerce_flow_edges(raw.get("edges"))
+    _validate_flow_graph_edges(node_ids, edges)
+
+    agent_map = {
+        agent.pk: agent
+        for agent in AgentConfiguration.objects.prefetch_related("use_groups").filter(
+            pk__in=agent_ids
+        )
+    }
+    missing_agent_ids = sorted(agent_ids - set(agent_map))
+    if missing_agent_ids:
+        raise ValueError(f"flow references unknown agents: {missing_agent_ids}")
+    if user is not None:
+        denied = [
+            agent.pk for agent in agent_map.values() if not agent.can_use(cast(Any, user))
+        ]
+        if denied:
+            raise PermissionDenied(
+                f"agent configuration is not accessible: {sorted(denied)}"
+            )
+
+    model_map = {
+        model.pk: model
+        for model in ModelConfiguration.objects.prefetch_related("use_groups").filter(
+            pk__in=model_ids
+        )
+    }
+    missing_model_ids = sorted(model_ids - set(model_map))
+    if missing_model_ids:
+        raise ValueError(f"flow references unknown models: {missing_model_ids}")
+    if user is not None:
+        denied_models = [
+            model.pk for model in model_map.values() if not model.can_use(cast(Any, user))
+        ]
+        if denied_models:
+            raise PermissionDenied(f"model configuration is not accessible: {sorted(denied_models)}")
+
+    credential_map = {
+        credential.pk: credential
+        for credential in Credential.objects.prefetch_related(
+            "allowed_groups", "allowed_users"
+        ).filter(pk__in=credential_ids)
+    }
+    missing_credential_ids = sorted(credential_ids - set(credential_map))
+    if missing_credential_ids:
+        raise ValueError(
+            f"flow references unknown credentials: {missing_credential_ids}"
+        )
+    if user is not None:
+        denied_credentials = [
+            credential.pk
+            for credential in credential_map.values()
+            if not credential.can_use(cast(Any, user))
+        ]
+        if denied_credentials:
+            raise PermissionDenied(
+                f"credential is not accessible: {sorted(denied_credentials)}"
+            )
+
+    agents: list[dict[str, Any]] = []
+    for node in nodes:
+        agent_data = dict(
+            agent_map[node["agent_id"]].resolved_mapping(user=user)  # type: ignore[index]
+        )
+        agent_data["id"] = node["id"]
+        prompt_text = str(node["prompt"]).strip()
+        if prompt_text:
+            prompt_data = agent_data.get("prompt", {})
+            prompt_mapping = (
+                dict(cast(dict[str, Any], prompt_data))
+                if isinstance(prompt_data, dict)
+                else {}
+            )
+            prompt_mapping["user"] = prompt_text
+            agent_data["prompt"] = prompt_mapping
+        model_obj = model_map[node["model_id"]]  # type: ignore[index]
+        model_data = agent_data.get("model", {})
+        model_mapping = (
+            dict(cast(dict[str, Any], model_data)) if isinstance(model_data, dict) else {}
+        )
+        model_mapping["name"] = model_obj.name
+        for stale_key in ("provider", "api_key", "base_url", "organization_id"):
+            model_mapping.pop(stale_key, None)
+        agent_data["model"] = model_mapping
+        credential_id = node["credential_id"]
+        if isinstance(credential_id, int):
+            credential_obj = credential_map[credential_id]
+            agent_data["credential"] = _credential_configuration_for_agent(
+                agent_data,
+                credential_obj,
+            )
+        agents.append(agent_data)
+
+    return {"agents": agents, "edges": edges}
+
+
+def _coerce_flow_edges(value: Any) -> list[tuple[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("flow edges must be a non-empty list")
+    edges: list[tuple[str, str]] = []
+    for edge in value:
+        source = ""
+        target = ""
+        if isinstance(edge, dict):
+            source = str(edge.get("source") or "").strip()
+            target = str(edge.get("target") or "").strip()
+        elif isinstance(edge, (list, tuple)) and len(edge) == 2:
+            source = str(edge[0] or "").strip()
+            target = str(edge[1] or "").strip()
+        else:
+            raise ValueError("each flow edge must be a mapping or 2-item sequence")
+        if not source or not target:
+            raise ValueError("each flow edge must define source and target")
+        edges.append((source, target))
+    return edges
+
+
+def _validate_flow_graph_edges(node_ids: set[str], edges: list[tuple[str, str]]) -> None:
+    allowed_sources = set(node_ids) | {"__start__"}
+    allowed_targets = set(node_ids) | {"__end__"}
+    has_start = False
+    has_end = False
+    for source, target in edges:
+        if source not in allowed_sources:
+            raise ValueError(f"unknown flow edge source: {source}")
+        if target not in allowed_targets:
+            raise ValueError(f"unknown flow edge target: {target}")
+        if target == "__start__":
+            raise ValueError("__start__ cannot be an edge target")
+        if source == "__end__":
+            raise ValueError("__end__ cannot be an edge source")
+        has_start = has_start or source == "__start__"
+        has_end = has_end or target == "__end__"
+    if not has_start:
+        raise ValueError("flow graph must include at least one __start__ edge")
+    if not has_end:
+        raise ValueError("flow graph must include at least one __end__ edge")
+
+def _apply_model_and_credential_overrides(
+    data: dict[str, Any],
+    *,
+    model_configuration: ModelConfiguration | None = None,
+    credential: Credential | None = None,
+    user: Any | None = None,
+) -> dict[str, Any]:
     if model_configuration is None and credential is None:
         return data
 
@@ -467,6 +781,89 @@ async def _run_agent_stream(
         if isinstance(command, Stop):
             stop_requested = True
         interrupt = command
+
+
+class _FlowStopRequested(RuntimeError):
+    pass
+
+
+async def _run_flow_stream(
+    *,
+    thread_id: int,
+    flow: CoreFlow,
+    challenge: CoreChallenge,
+    workspace: Path,
+    metadata: Path,
+    webhook: Webhook | None,
+    model_name: str,
+    ctf_prompt: str = "",
+) -> Thread.Status:
+    messages: list[str] = []
+    if ctf_prompt:
+        messages.append(ctf_prompt)
+    initial_command = await sync_to_async(
+        _pop_next_thread_command,
+        thread_sensitive=True,
+    )(thread_id)
+    match initial_command:
+        case Prompt() | Steer():
+            if initial_command.text:
+                messages.append(initial_command.text)
+        case Stop():
+            return Thread.Status.STOPPED
+        case Nop():
+            ...
+
+    renderers: dict[str, EventRenderer[Any]] = {}
+
+    async def event_observer(event: Event[Any]) -> None:
+        if await sync_to_async(_consume_stop_command, thread_sensitive=True)(thread_id):
+            raise _FlowStopRequested
+        renderer = _renderer_for_event(
+            event,
+            model_name=model_name,
+            renderers=renderers,
+        )
+        await sync_to_async(_record_stream_event, thread_sensitive=True)(
+            thread_id,
+            event,
+            model_name,
+            renderer,
+        )
+
+    metadata_directory_factory = _flow_node_metadata_directory_factory(
+        base_directory=metadata
+    )
+    state = {
+        "challenge": challenge,
+        "workspace_directory": workspace,
+        "metadata_directory": metadata,
+        "metadata_directory_factory": metadata_directory_factory,
+        "webhook": webhook,
+        "event_observer": event_observer,
+        "messages": messages,
+    }
+    try:
+        await flow.graph.ainvoke(state)  # pyright: ignore[reportUnknownMemberType]
+    except _FlowStopRequested:
+        return Thread.Status.STOPPED
+    return Thread.Status.COMPLETED
+
+
+def _flow_node_metadata_directory_factory(
+    *, base_directory: Path
+) -> Callable[[str], Path]:
+    run_counts: dict[str, int] = {}
+
+    def resolve(node_id: str) -> Path:
+        next_value = int(run_counts.get(node_id, 0)) + 1
+        run_counts[node_id] = next_value
+        safe_node_id = re.sub(r"[^a-zA-Z0-9._-]+", "_", node_id).strip("._-")
+        if not safe_node_id:
+            safe_node_id = "node"
+        return base_directory / "flow" / safe_node_id / f"run-{next_value:04d}"
+
+    return resolve
 
 
 def _record_stream_event(
@@ -604,6 +1001,30 @@ def _pop_next_thread_command(thread_id: int) -> Interrupt:
     return interrupt
 
 
+def _consume_stop_command(thread_id: int) -> bool:
+    message = (
+        SteeringMessage.objects.filter(
+            thread_id=thread_id,
+            delivered_at__isnull=True,
+            kind=SteeringMessage.Kind.STOP,
+        )
+        .order_by("created_at")
+        .first()
+    )
+    if message is None:
+        return False
+    message.delivered_at = timezone.now()
+    message.save(update_fields=["delivered_at", "updated_at"])
+    _record_event(
+        message.thread,
+        source="user",
+        kind="stop",
+        text="",
+        raw={"steering_message_id": message.pk},
+    )
+    return True
+
+
 def _int_value(value: object) -> int:
     if isinstance(value, bool):
         return 0
@@ -675,6 +1096,8 @@ def _import_agent_class(class_path: str) -> type[Any]:
 def _thread_model_name(thread: Thread) -> str:
     if thread.model is not None:
         return thread.model.name
+    if thread.agent is None:
+        return "unknown"
     model = thread.agent.resolved_mapping(user=thread.created_by).get("model", {})
     if isinstance(model, dict) and isinstance(model.get("name"), str):
         return str(model["name"])

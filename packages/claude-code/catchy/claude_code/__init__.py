@@ -245,8 +245,9 @@ class ClaudeCodeAgent(Agent[Message]):
     key: str = "claude-code"
 
     @staticmethod
-    def from_configuration(configuration: Configuration) -> ClaudeCodeAgent:
-        match configuration.credential:
+    def from_configuration(configuration: dict[str, Any]) -> ClaudeCodeAgent:
+        rendered_configuration = Configuration.model_validate(configuration)
+        match rendered_configuration.credential:
             case _AnthropicCompatibleApiKeyCredential() as credential:
                 environment = {
                     "ANTHROPIC_API_KEY": credential.api_key,
@@ -262,16 +263,18 @@ class ClaudeCodeAgent(Agent[Message]):
                 }
 
         return ClaudeCodeAgent(
-            id=configuration.id,
-            model_name=configuration.model.name,
+            id=rendered_configuration.id,
+            model_name=rendered_configuration.model.name,
             container_environment=environment,
-            container_challenge_directory=configuration.directory.challenge,
-            container_workspace_directory=configuration.directory.workspace,
-            container_metadata_directory=configuration.directory.metadata,
-            docker_image=configuration.container.image,
-            docker_client=DockerClient(base_url=configuration.container.socket),
-            user_prompt_template=configuration.prompt.user,
-            docker_socket=configuration.container.socket,
+            container_challenge_directory=rendered_configuration.directory.challenge,
+            container_workspace_directory=rendered_configuration.directory.workspace,
+            container_metadata_directory=rendered_configuration.directory.metadata,
+            docker_image=rendered_configuration.container.image,
+            docker_client=DockerClient(
+                base_url=rendered_configuration.container.socket
+            ),
+            user_prompt_template=rendered_configuration.prompt.user,
+            docker_socket=rendered_configuration.container.socket,
         )
 
     def __init__(
@@ -668,6 +671,24 @@ chown -R "$uid:$gid" "$config_dir"
         projects_directory = metadata_directory / ".claude" / "projects"
         return projects_directory.exists() and any(projects_directory.rglob("*.jsonl"))
 
+    def last_agent_message_from_events(
+        self,
+        events: list[Event[Message]],
+    ) -> str:
+        message_parts: list[str] = []
+        for event in reversed(events):
+            for component in reversed(list(ClaudeCodeEventRenderer().render(event))):
+                match component:
+                    case Delta(tag="agent", text=text):
+                        message_parts.append(text)
+                    case _:
+                        if message_parts:
+                            break
+            if message_parts:
+                break
+
+        return "".join(reversed(message_parts))
+
 
 class ClaudeCodeEventRenderer(EventRenderer[Message]):
     def __init__(
@@ -909,7 +930,16 @@ class ClaudeCodeHandoffExporter(HandoffExporter[Message]):
                     flush_pending()
                     pending_label = label
                     pending_text = delta.text
-                case TextLog() | JsonLog() | TokenUsage() | ItemCompleted() | TurnStarted() | TurnCompleted() | ThreadStarted() | Nop():
+                case (
+                    TextLog()
+                    | JsonLog()
+                    | TokenUsage()
+                    | ItemCompleted()
+                    | TurnStarted()
+                    | TurnCompleted()
+                    | ThreadStarted()
+                    | Nop()
+                ):
                     flush_pending()
         flush_pending()
         return "".join(chunks)

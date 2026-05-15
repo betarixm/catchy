@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+
+{% block title %}{{ flow.name }} — Flows{% endblock %}
+
+{% block content %}
+  <div class="crumbs reveal">
+    <a href="{% url 'ctf:index' %}">Index</a>
+    <span class="sep">/</span>
+    <a href="{% url 'ctf:flow_list' %}">Flows</a>
+    <span class="sep">/</span>
+    <span class="now">{{ flow.slug }}</span>
+  </div>
+
+  <div class="page-head">
+    <div class="title">
+      <h1 class="h-page reveal">{{ flow.name }}</h1>
+      <div class="meta-row">
+        {% if resolves %}
+          <span class="pill pill-completed">resolver ok</span>
+        {% else %}
+          <span class="pill pill-failed">resolver failed</span>
+        {% endif %}
+      </div>
+    </div>
+    <div class="actions">
+      <a class="btn btn-ghost" href="{% url 'ctf:flow_update' flow.slug %}">Edit flow</a>
+    </div>
+  </div>
+
+  {% with stats=thread_stats %}
+  {% if stats.total %}
+    <section class="reveal mb-5">
+      {% include "ctf/_stats_overview.html" with stats=stats %}
+      <div class="breakdown-grid">
+        {% include "ctf/_breakdown.html" with title="By CTF" rows=stats.by_ctf total=stats.total %}
+        {% include "ctf/_breakdown.html" with title="By challenge" rows=stats.by_challenge total=stats.total label_class="mono" %}
+        {% include "ctf/_breakdown.html" with title="By model" rows=stats.by_model total=stats.total label_class="mono" %}
+      </div>
+    </section>
+  {% endif %}
+  {% endwith %}
+
+  <section class="reveal mb-5">
+    <div class="panel">
+      <div class="panel-head">
+        <strong>Flow Graph</strong>
+        <span class="mono xsmall" id="flow-view-status">read-only</span>
+      </div>
+      <div class="panel-body">
+        <div class="flow-view-canvas" id="flow-view-canvas">
+          <svg class="flow-view-edges" id="flow-view-edges" aria-hidden="true"></svg>
+          <div class="flow-view-terminal flow-view-terminal-start" data-terminal="__start__">__start__</div>
+          <div class="flow-view-terminal flow-view-terminal-end" data-terminal="__end__">__end__</div>
+          <div id="flow-view-node-layer"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="reveal">
+    <div class="panel">
+      <div class="panel-head">
+        <strong>{{ flow.slug }}.yaml</strong>
+        <span>stored</span>
+      </div>
+      <pre>{{ flow.yaml }}</pre>
+    </div>
+  </section>
+
+  {{ flow_graph|json_script:"flow-view-graph" }}
+{% endblock %}
+
+{% block scripts %}
+  <style>
+    .flow-view-canvas {
+      position: relative;
+      min-height: 500px;
+      border: 1px solid var(--ink);
+      background:
+        radial-gradient(circle at 1px 1px, rgba(14,14,14,0.12) 1px, transparent 0) 0 0/22px 22px,
+        linear-gradient(180deg, var(--paper-2), var(--paper));
+      overflow: hidden;
+    }
+    .flow-view-edges {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+    .flow-view-edge-path {
+      fill: none;
+      stroke: rgba(14,14,14,0.58);
+      stroke-width: 2;
+    }
+    .flow-view-terminal {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      min-width: 90px;
+      padding: 8px 10px;
+      border: 1px solid var(--ink);
+      background: var(--paper);
+      font-family: var(--mono);
+      font-size: 11px;
+      text-align: center;
+      z-index: 2;
+    }
+    .flow-view-terminal-start { left: 20px; }
+    .flow-view-terminal-end { right: 20px; }
+    .flow-view-node {
+      position: absolute;
+      width: 220px;
+      border: 1px solid var(--ink);
+      background: var(--paper);
+      z-index: 3;
+      box-shadow: 0 4px 0 rgba(14,14,14,0.08);
+    }
+    .flow-view-node-head {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--rule);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 500;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .flow-view-node-body { padding: 8px 10px; font-size: 12px; color: var(--muted); }
+    .flow-view-node-body strong { color: var(--ink); font-size: 12px; }
+    .flow-view-node-body .line { margin-top: 4px; }
+    .flow-view-node-body .prompt {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid var(--rule-soft);
+      color: var(--ink-soft);
+      max-height: 80px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+    }
+    @media (max-width: 1024px) {
+      .flow-view-canvas { min-height: 420px; }
+      .flow-view-node { width: 190px; }
+    }
+  </style>
+
+  <script type="module">
+    import { NodeEditor } from "https://esm.sh/rete@2.0.2";
+
+    const byId = (id) => document.getElementById(id);
+    const parseScriptJson = (id) => {
+      const el = byId(id);
+      if (!el) return null;
+      try { return JSON.parse(el.textContent || "null"); }
+      catch (_) { return null; }
+    };
+
+    const graph = parseScriptJson("flow-view-graph") || { nodes: [], edges: [] };
+    const statusEl = byId("flow-view-status");
+    const canvas = byId("flow-view-canvas");
+    const nodeLayer = byId("flow-view-node-layer");
+    const edgesSvg = byId("flow-view-edges");
+    const editor = new NodeEditor();
+
+    function elementCenter(el) {
+      const rect = el.getBoundingClientRect();
+      const canvasRect = canvas.getBoundingClientRect();
+      return {
+        x: rect.left - canvasRect.left + rect.width / 2,
+        y: rect.top - canvasRect.top + rect.height / 2
+      };
+    }
+
+    function edgePoint(id) {
+      if (id === "__start__" || id === "__end__") {
+        const el = canvas.querySelector(`[data-terminal="${id}"]`);
+        return el ? elementCenter(el) : null;
+      }
+      const el = nodeLayer.querySelector(`[data-node-id="${CSS.escape(id)}"]`);
+      return el ? elementCenter(el) : null;
+    }
+
+    function renderEdges() {
+      edgesSvg.innerHTML = "";
+      const edges = Array.isArray(graph.edges) ? graph.edges : [];
+      edges.forEach((edge) => {
+        const source = String(edge.source || "");
+        const target = String(edge.target || "");
+        const from = edgePoint(source);
+        const to = edgePoint(target);
+        if (!from || !to) return;
+        const dx = Math.max(50, Math.abs(to.x - from.x) * 0.45);
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("class", "flow-view-edge-path");
+        path.setAttribute(
+          "d",
+          `M ${from.x} ${from.y} C ${from.x + dx} ${from.y}, ${to.x - dx} ${to.y}, ${to.x} ${to.y}`
+        );
+        edgesSvg.appendChild(path);
+      });
+    }
+
+    async function renderNodes() {
+      nodeLayer.innerHTML = "";
+      const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+      for (const node of nodes) {
+        const id = String(node.id || "");
+        if (!id) continue;
+        try { await editor.addNode({ id }); } catch (_) {}
+        const el = document.createElement("article");
+        el.className = "flow-view-node";
+        el.dataset.nodeId = id;
+        el.style.left = `${Number(node.x) || 320}px`;
+        el.style.top = `${Number(node.y) || 140}px`;
+        const prompt = String(node.prompt || "").trim();
+        el.innerHTML = `
+          <div class="flow-view-node-head"><span>${id}</span><span class="muted">node</span></div>
+          <div class="flow-view-node-body">
+            <div><strong>${String(node.agent || "—")}</strong></div>
+            <div class="line">${String(node.model || "—")}</div>
+            <div class="line">${String(node.credential || "—")}</div>
+            ${prompt ? `<div class="prompt">${prompt.replace(/[&<>\"]/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]))}</div>` : ""}
+          </div>
+        `;
+        nodeLayer.appendChild(el);
+      }
+      renderEdges();
+    }
+
+    renderNodes().then(() => {
+      statusEl.textContent = "rendered";
+    }).catch((error) => {
+      statusEl.textContent = `render error: ${error}`;
+    });
+
+    window.addEventListener("resize", () => renderEdges());
+  </script>
+{% endblock %}

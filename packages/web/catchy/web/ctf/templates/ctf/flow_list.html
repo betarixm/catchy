@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block title %}Flows — Catchy{% endblock %}
+
+{% block content %}
+  <div class="crumbs reveal">
+    <a href="{% url 'ctf:index' %}">Index</a>
+    <span class="sep">/</span>
+    <span class="now">Flows</span>
+  </div>
+
+  <div class="page-head">
+    <div class="title">
+      <h1 class="h-page reveal">Flows.</h1>
+      <p class="lead reveal mt-3">Stored YAML configurations for runnable multi-agent flows.</p>
+    </div>
+    <div class="actions">
+      <a class="btn btn-primary" href="{% url 'ctf:flow_create' %}">New flow</a>
+    </div>
+  </div>
+
+  <p class="muted small mb-5">
+    {{ list_stats.count|default:0 }} flow{{ list_stats.count|default:0|pluralize }}
+    <span class="mute2"> · </span>
+    {{ list_stats.active|default:0 }} in use
+    <span class="mute2"> · </span>
+    {{ list_stats.thread_total|default:0 }} thread{{ list_stats.thread_total|default:0|pluralize }} total
+  </p>
+
+  <ul class="idx-list reveal">
+    {% for flow in flows %}
+      <li class="idx-row">
+        <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
+        <div class="idx-title">
+          <a class="idx-link" href="{{ flow.get_absolute_url }}">{{ flow.name }}</a>
+          <span class="idx-desc"><span class="mono muted">/{{ flow.slug }}</span></span>
+        </div>
+        <span class="idx-meta">
+          <span class="mono muted num">{{ flow.thread_count|default:0 }} thread{{ flow.thread_count|default:0|pluralize }}</span>
+        </span>
+      </li>
+    {% empty %}
+      <li>
+        <div class="empty">
+          No flows yet.
+          <a class="btn btn-sm btn-primary empty-cta" href="{% url 'ctf:flow_create' %}">Define your first flow</a>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+{% endblock %}

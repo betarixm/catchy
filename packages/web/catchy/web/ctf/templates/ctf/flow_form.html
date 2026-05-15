@@ -1,0 +1,903 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} — Catchy{% endblock %}
+
+{% block container_class %}container{% endblock %}
+
+{% block content %}
+  <div class="crumbs reveal">
+    <a href="{% url 'ctf:index' %}">Index</a>
+    <span class="sep">/</span>
+    <a href="{% url 'ctf:flow_list' %}">Flows</a>
+    <span class="sep">/</span>
+    <span class="now">{{ title }}</span>
+  </div>
+
+  <div class="page-head" style="grid-template-columns: 1fr;">
+    <div class="title">
+      <h1 class="h-page reveal mt-2">{{ title }}</h1>
+      <p class="lead reveal mt-3">Edit nodes with Rete and serialize the graph as YAML on save.</p>
+    </div>
+  </div>
+
+  <form method="post" class="editorial reveal" id="flow-form">
+    {% csrf_token %}
+
+    {% if form.non_field_errors %}
+      <ul class="errorlist" style="margin-bottom: 16px;">
+        {% for error in form.non_field_errors %}<li>{{ error }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <div class="flow-form-grid">
+      <section class="panel flow-editor-panel">
+        <div class="panel-head">
+          <strong>Flow Graph</strong>
+          <span class="mono xsmall" id="flow-editor-status">ready</span>
+        </div>
+        <div class="panel-body flow-editor-wrap">
+          <div class="flow-toolbar">
+            <button type="button" class="btn btn-sm btn-ghost" id="add-flow-node">+ Node</button>
+            <button type="button" class="btn btn-sm btn-ghost" id="add-flow-edge">+ Connection</button>
+          </div>
+          <div class="flow-canvas" id="flow-canvas">
+            <div class="flow-stage" id="flow-stage">
+              <svg class="flow-edges" id="flow-edges" aria-hidden="true"></svg>
+              <div class="flow-terminal flow-terminal-start" data-terminal="__start__">
+                <span class="flow-socket flow-socket-out" data-socket-id="__start__" data-socket-role="out" title="Drag to connect"></span>
+                __start__
+              </div>
+              <div class="flow-terminal flow-terminal-end" data-terminal="__end__">
+                __end__
+                <span class="flow-socket flow-socket-in" data-socket-id="__end__" data-socket-role="in" title="Drop connection here"></span>
+              </div>
+              <div id="flow-node-layer"></div>
+            </div>
+          </div>
+
+          {% if form.graph_payload.errors %}
+            <ul class="errorlist mt-2">
+              {% for e in form.graph_payload.errors %}<li>{{ e }}</li>{% endfor %}
+            </ul>
+          {% endif %}
+
+          <div class="flow-edges-table-wrap mt-3">
+            <table class="flow-edges-table" id="flow-edges-table">
+              <thead>
+                <tr><th>Source</th><th>Target</th><th></th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><strong>Flow Fields</strong><span>metadata</span></div>
+        <div class="panel-body">
+          <p>
+            {{ form.name.label_tag }}
+            {{ form.name }}
+            {% if form.name.help_text %}<span class="helptext">{{ form.name.help_text|safe }}</span>{% endif %}
+            {% if form.name.errors %}<ul class="errorlist">{% for e in form.name.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+          </p>
+          <p>
+            {{ form.slug.label_tag }}
+            {{ form.slug }}
+            {% if form.slug.help_text %}<span class="helptext">{{ form.slug.help_text|safe }}</span>{% endif %}
+            {% if form.slug.errors %}<ul class="errorlist">{% for e in form.slug.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+          </p>
+          <p>
+            {{ form.view_groups.label_tag }}
+            {{ form.view_groups }}
+            {% if form.view_groups.help_text %}<span class="helptext">{{ form.view_groups.help_text|safe }}</span>{% endif %}
+            {% if form.view_groups.errors %}<ul class="errorlist">{% for e in form.view_groups.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+          </p>
+          <p>
+            {{ form.use_groups.label_tag }}
+            {{ form.use_groups }}
+            {% if form.use_groups.help_text %}<span class="helptext">{{ form.use_groups.help_text|safe }}</span>{% endif %}
+            {% if form.use_groups.errors %}<ul class="errorlist">{% for e in form.use_groups.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+          </p>
+
+          {{ form.yaml }}
+          {{ form.graph_payload }}
+          {% if form.yaml.errors %}
+            <ul class="errorlist mt-2">
+              {% for e in form.yaml.errors %}<li>{{ e }}</li>{% endfor %}
+            </ul>
+          {% endif %}
+
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Save</button>
+            <a href="javascript:history.back()" class="btn-bare">← Cancel</a>
+          </div>
+        </div>
+      </section>
+    </div>
+  </form>
+
+  <aside class="flow-inspector panel" id="flow-inspector">
+    <div class="panel-head"><strong>Node Inspector</strong><span id="flow-inspector-id">none</span></div>
+    <div class="panel-body">
+      <p>
+        <label for="ins-node-id">ID</label>
+        <input id="ins-node-id" type="text" placeholder="node-1">
+      </p>
+      <p>
+        <label for="ins-agent">Agent</label>
+        <select id="ins-agent"></select>
+      </p>
+      <p>
+        <label for="ins-model">Model</label>
+        <select id="ins-model"></select>
+      </p>
+      <p>
+        <label for="ins-credential">Credential</label>
+        <select id="ins-credential"></select>
+      </p>
+      <p>
+        <label for="ins-prompt">Prompt</label>
+        <textarea id="ins-prompt" rows="8" placeholder="Node-specific additional prompt"></textarea>
+      </p>
+      <div class="row">
+        <button type="button" class="btn btn-sm btn-danger" id="delete-flow-node">Delete node</button>
+      </div>
+      <p class="helptext mt-2">Each node runs from the selected agent config, with node-level prompt/credential/model overwrites applied.</p>
+    </div>
+  </aside>
+
+  {{ editor_agents|json_script:"flow-editor-agents" }}
+  {{ editor_models|json_script:"flow-editor-models" }}
+  {{ editor_credentials|json_script:"flow-editor-credentials" }}
+  {{ editor_initial_graph|json_script:"flow-editor-initial" }}
+{% endblock %}
+
+{% block scripts %}
+  <style>
+    .flow-form-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 2.25fr) minmax(320px, 1fr);
+      gap: 20px;
+      align-items: start;
+    }
+    .flow-editor-wrap { position: relative; }
+    .flow-toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+    .flow-canvas {
+      position: relative;
+      min-height: clamp(560px, 72vh, 860px);
+      border: 1px solid var(--ink);
+      background:
+        radial-gradient(circle at 1px 1px, rgba(14,14,14,0.12) 1px, transparent 0) 0 0/22px 22px,
+        linear-gradient(180deg, var(--paper-2), var(--paper));
+      overflow: hidden;
+    }
+    .flow-stage {
+      position: absolute;
+      inset: 0;
+      transform-origin: 0 0;
+      will-change: transform;
+    }
+    .flow-edges {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+    .flow-edge-path {
+      fill: none;
+      stroke: rgba(14,14,14,0.58);
+      stroke-width: 2;
+    }
+    .flow-edge-temp { stroke-dasharray: 6 6; stroke: var(--info); }
+    .flow-terminal {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      min-width: 90px;
+      padding: 8px 10px;
+      border: 1px solid var(--ink);
+      background: var(--paper);
+      font-family: var(--mono);
+      font-size: 11px;
+      text-align: center;
+      z-index: 2;
+    }
+    .flow-terminal-start { left: 20px; }
+    .flow-terminal-end { right: 20px; }
+    .flow-node {
+      position: absolute;
+      width: 190px;
+      border: 1px solid var(--ink);
+      background: var(--paper);
+      cursor: move;
+      user-select: none;
+      z-index: 3;
+      box-shadow: 0 4px 0 rgba(14,14,14,0.08);
+    }
+    .flow-node.selected { outline: 2px solid var(--info); outline-offset: 1px; }
+    .flow-node-head {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--rule);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 500;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .flow-node-body { padding: 8px 10px; font-size: 12px; color: var(--muted); }
+    .flow-node-body strong { color: var(--ink); font-size: 12px; }
+    .flow-socket {
+      position: absolute;
+      top: 50%;
+      width: 12px;
+      height: 12px;
+      transform: translateY(-50%);
+      border-radius: 999px;
+      border: 1px solid var(--ink);
+      background: var(--paper);
+      z-index: 5;
+    }
+    .flow-socket.flow-socket-out {
+      right: -7px;
+      cursor: crosshair;
+    }
+    .flow-socket.flow-socket-in {
+      left: -7px;
+    }
+    .flow-socket.flow-socket-target {
+      background: var(--info);
+      border-color: var(--info);
+    }
+    .flow-inspector {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      width: min(360px, calc(100vw - 40px));
+      z-index: 35;
+      border-color: var(--ink);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.14);
+    }
+    .flow-edges-table-wrap { max-height: 190px; overflow: auto; border: 1px solid var(--rule); }
+    .flow-edges-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .flow-edges-table th, .flow-edges-table td { border-bottom: 1px solid var(--rule-soft); padding: 6px; text-align: left; }
+    .flow-edges-table th { font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+    .flow-edges-table select { max-width: none; width: 100%; padding: 6px 8px; font-size: 12px; }
+    .flow-edges-table button { padding: 4px 8px; font-size: 11px; }
+    @media (max-width: 1024px) {
+      .flow-form-grid { grid-template-columns: 1fr; }
+      .flow-inspector { position: static; width: 100%; margin-top: 16px; }
+      .flow-canvas { min-height: 520px; }
+    }
+  </style>
+
+  <script type="module">
+    import { NodeEditor, getUID } from "https://esm.sh/rete@2.0.2";
+
+    const byId = (id) => document.getElementById(id);
+    const parseScriptJson = (id) => {
+      const el = byId(id);
+      if (!el) return null;
+      try { return JSON.parse(el.textContent || "null"); }
+      catch (_) { return null; }
+    };
+
+    const parsedAgents = parseScriptJson("flow-editor-agents");
+    const parsedModels = parseScriptJson("flow-editor-models");
+    const parsedCredentials = parseScriptJson("flow-editor-credentials");
+    const agentOptions = Array.isArray(parsedAgents) ? parsedAgents : [];
+    const modelOptions = Array.isArray(parsedModels) ? parsedModels : [];
+    const credentialOptions = Array.isArray(parsedCredentials) ? parsedCredentials : [];
+    const initial = parseScriptJson("flow-editor-initial") || { nodes: [], edges: [] };
+
+    const form = byId("flow-form");
+    const hiddenPayload = byId("id_graph_payload");
+    const statusEl = byId("flow-editor-status");
+    const canvas = byId("flow-canvas");
+    const stage = byId("flow-stage");
+    const nodeLayer = byId("flow-node-layer");
+    const edgesSvg = byId("flow-edges");
+    const edgesTbody = byId("flow-edges-table")?.querySelector("tbody");
+
+    const inspector = {
+      root: byId("flow-inspector"),
+      nodeId: byId("ins-node-id"),
+      agent: byId("ins-agent"),
+      model: byId("ins-model"),
+      credential: byId("ins-credential"),
+      prompt: byId("ins-prompt"),
+      current: byId("flow-inspector-id"),
+      deleteBtn: byId("delete-flow-node")
+    };
+
+    const terminals = {
+      "__start__": byId("flow-canvas")?.querySelector('[data-terminal="__start__"]'),
+      "__end__": byId("flow-canvas")?.querySelector('[data-terminal="__end__"]')
+    };
+
+    const editor = new NodeEditor();
+    const state = {
+      nodes: new Map(),
+      edges: [],
+      selectedNodeId: null,
+      connectionDrag: null,
+      viewport: { scale: 1, min: 0.45, max: 2.2, offsetX: 0, offsetY: 0 }
+    };
+
+    function nodeLabel(node) {
+      const agent = agentOptions.find((item) => String(item.id) === String(node.agent_id));
+      const model = modelOptions.find((item) => String(item.id) === String(node.model_id));
+      const credential = credentialOptions.find((item) => String(item.id) === String(node.credential_id));
+      return {
+        agent: agent ? agent.name : "agent not selected",
+        model: model ? model.name : "model not selected",
+        credential: credential ? credential.name : "credential not selected"
+      };
+    }
+
+    function validNodeId(value) {
+      return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(value);
+    }
+
+    function uniqueNodeId(seed = "node") {
+      let index = state.nodes.size + 1;
+      let id = `${seed}-${index}`;
+      while (state.nodes.has(id)) {
+        index += 1;
+        id = `${seed}-${index}`;
+      }
+      return id;
+    }
+
+    async function addNode(nodeLike) {
+      const id = String(nodeLike.id || uniqueNodeId());
+      const node = {
+        id,
+        agent_id: nodeLike.agent_id || "",
+        model_id: nodeLike.model_id || "",
+        credential_id: nodeLike.credential_id || "",
+        prompt: String(nodeLike.prompt || ""),
+        x: Number.isFinite(Number(nodeLike.x)) ? Number(nodeLike.x) : 300,
+        y: Number.isFinite(Number(nodeLike.y)) ? Number(nodeLike.y) : 180
+      };
+      if (state.nodes.has(id)) return;
+      await editor.addNode({ id: node.id });
+      state.nodes.set(node.id, node);
+    }
+
+    async function addEdge(source, target) {
+      if (!source || !target || source === "__end__" || target === "__start__") return;
+      if (source === target) return;
+      const pair = `${source}=>${target}`;
+      if (state.edges.some((edge) => `${edge.source}=>${edge.target}` === pair)) return;
+      state.edges.push({ id: getUID(), source, target });
+      if (source !== "__start__" && target !== "__end__") {
+        try {
+          await editor.addConnection({ id: getUID(), source, target });
+        } catch (_) {
+          // Keep UI state authoritative even when pseudo-node edges are not tracked by rete.
+        }
+      }
+    }
+
+    function removeNode(id) {
+      state.nodes.delete(id);
+      state.edges = state.edges.filter((edge) => edge.source !== id && edge.target !== id);
+      if (state.selectedNodeId === id) state.selectedNodeId = null;
+    }
+
+    function elementCenter(el) {
+      const rect = el.getBoundingClientRect();
+      return screenToStage(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    }
+
+    function screenToStage(clientX, clientY) {
+      const canvasRect = canvas.getBoundingClientRect();
+      const { scale, offsetX, offsetY } = state.viewport;
+      return {
+        x: (clientX - canvasRect.left - offsetX) / scale,
+        y: (clientY - canvasRect.top - offsetY) / scale
+      };
+    }
+
+    function socketPoint(id, role) {
+      const socket = canvas.querySelector(
+        `[data-socket-id="${CSS.escape(id)}"][data-socket-role="${role}"]`
+      );
+      if (socket) return elementCenter(socket);
+      if (id === "__start__" || id === "__end__") return edgePoint(id);
+      return edgePoint(id);
+    }
+
+    function edgePath(from, to) {
+      const dx = Math.max(50, Math.abs(to.x - from.x) * 0.45);
+      return `M ${from.x} ${from.y} C ${from.x + dx} ${from.y}, ${to.x - dx} ${to.y}, ${to.x} ${to.y}`;
+    }
+
+    function edgePoint(id) {
+      if (id === "__start__" || id === "__end__") {
+        const el = terminals[id];
+        if (!el) return null;
+        return elementCenter(el);
+      }
+      const el = nodeLayer.querySelector(`[data-node-id="${CSS.escape(id)}"]`);
+      if (!el) return null;
+      return elementCenter(el);
+    }
+
+    function renderEdges() {
+      edgesSvg.innerHTML = "";
+      state.edges.forEach((edge) => {
+        const from = socketPoint(edge.source, "out");
+        const to = socketPoint(edge.target, "in");
+        if (!from || !to) return;
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("class", "flow-edge-path");
+        path.setAttribute("d", edgePath(from, to));
+        edgesSvg.appendChild(path);
+      });
+      renderTempEdge();
+    }
+
+    function clearSocketHighlights() {
+      canvas
+        .querySelectorAll(".flow-socket-target")
+        .forEach((el) => el.classList.remove("flow-socket-target"));
+    }
+
+    function socketFromPoint(clientX, clientY, role) {
+      const hit = document.elementFromPoint(clientX, clientY);
+      const socket = hit?.closest?.(
+        `[data-socket-role="${role}"][data-socket-id]`
+      );
+      return socket || null;
+    }
+
+    function highlightTargetSocket(clientX, clientY) {
+      clearSocketHighlights();
+      const socket = socketFromPoint(clientX, clientY, "in");
+      if (socket) socket.classList.add("flow-socket-target");
+      return socket;
+    }
+
+    function renderTempEdge() {
+      if (!state.connectionDrag) return;
+      const from = socketPoint(state.connectionDrag.sourceId, "out");
+      if (!from) return;
+      const to = {
+        x: state.connectionDrag.x,
+        y: state.connectionDrag.y
+      };
+      const stagePoint = screenToStage(to.x, to.y);
+      to.x = stagePoint.x;
+      to.y = stagePoint.y;
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("class", "flow-edge-path flow-edge-temp");
+      path.setAttribute("d", edgePath(from, to));
+      edgesSvg.appendChild(path);
+    }
+
+    function beginConnectionDrag(sourceId, event) {
+      event.stopPropagation();
+      event.preventDefault();
+      state.connectionDrag = {
+        sourceId,
+        x: event.clientX,
+        y: event.clientY
+      };
+      statusEl.textContent = `connect from ${sourceId}`;
+      window.addEventListener("pointermove", onConnectionDragMove);
+      window.addEventListener("pointerup", onConnectionDragEnd, { once: true });
+      renderEdges();
+    }
+
+    function onConnectionDragMove(event) {
+      if (!state.connectionDrag) return;
+      state.connectionDrag.x = event.clientX;
+      state.connectionDrag.y = event.clientY;
+      highlightTargetSocket(event.clientX, event.clientY);
+      renderEdges();
+    }
+
+    async function onConnectionDragEnd(event) {
+      const drag = state.connectionDrag;
+      state.connectionDrag = null;
+      window.removeEventListener("pointermove", onConnectionDragMove);
+      clearSocketHighlights();
+      if (!drag) {
+        renderEdges();
+        return;
+      }
+      const targetSocket = socketFromPoint(event.clientX, event.clientY, "in");
+      const targetId = targetSocket?.getAttribute("data-socket-id") || "";
+      if (targetId) {
+        await addEdge(drag.sourceId, targetId);
+        renderEdgesTable();
+        syncHidden();
+        statusEl.textContent = "ready";
+      } else {
+        statusEl.textContent = "connection canceled";
+      }
+      renderEdges();
+    }
+
+    function renderNodes() {
+      nodeLayer.innerHTML = "";
+      state.nodes.forEach((node) => {
+        const labels = nodeLabel(node);
+        const el = document.createElement("div");
+        el.className = "flow-node" + (state.selectedNodeId === node.id ? " selected" : "");
+        el.dataset.nodeId = node.id;
+        el.setAttribute("role", "button");
+        el.tabIndex = 0;
+        el.style.left = `${node.x}px`;
+        el.style.top = `${node.y}px`;
+        el.innerHTML = `
+          <span class="flow-socket flow-socket-in" data-socket-id="${node.id}" data-socket-role="in" title="Drop connection here"></span>
+          <span class="flow-socket flow-socket-out" data-socket-id="${node.id}" data-socket-role="out" title="Drag to connect"></span>
+          <div class="flow-node-head"><span>${node.id}</span><span class="muted">drag</span></div>
+          <div class="flow-node-body">
+            <div><strong>${labels.agent}</strong></div>
+            <div class="mt-1">${labels.model}</div>
+            <div class="mt-1">${labels.credential}</div>
+          </div>
+        `;
+        let dragging = false;
+        let startX = 0;
+        let startY = 0;
+        let baseX = 0;
+        let baseY = 0;
+
+        el.addEventListener("pointerdown", (event) => {
+          dragging = true;
+          startX = event.clientX;
+          startY = event.clientY;
+          baseX = node.x;
+          baseY = node.y;
+          el.setPointerCapture(event.pointerId);
+        });
+        el.addEventListener("pointermove", (event) => {
+          if (!dragging) return;
+          const dx = (event.clientX - startX) / state.viewport.scale;
+          const dy = (event.clientY - startY) / state.viewport.scale;
+          node.x = Math.max(120, baseX + dx);
+          node.y = Math.max(40, baseY + dy);
+          el.style.left = `${node.x}px`;
+          el.style.top = `${node.y}px`;
+          renderEdges();
+        });
+        el.addEventListener("pointerup", () => {
+          dragging = false;
+          syncHidden();
+        });
+        const outSocket = el.querySelector('[data-socket-role="out"]');
+        outSocket?.addEventListener("pointerdown", (event) => {
+          beginConnectionDrag(node.id, event);
+        });
+        const inSocket = el.querySelector('[data-socket-role="in"]');
+        inSocket?.addEventListener("pointerdown", (event) => {
+          event.stopPropagation();
+        });
+        el.addEventListener("click", () => {
+          selectNode(node.id);
+        });
+        nodeLayer.appendChild(el);
+      });
+      renderEdges();
+    }
+
+    function edgeOptions(type) {
+      const ids = Array.from(state.nodes.keys()).sort();
+      if (type === "source") return ["__start__", ...ids];
+      return [...ids, "__end__"];
+    }
+
+    function renderEdgesTable() {
+      if (!edgesTbody) return;
+      edgesTbody.innerHTML = "";
+      state.edges.forEach((edge) => {
+        const tr = document.createElement("tr");
+        const sourceTd = document.createElement("td");
+        const targetTd = document.createElement("td");
+        const actionTd = document.createElement("td");
+
+        const sourceSelect = document.createElement("select");
+        edgeOptions("source").forEach((id) => {
+          const option = document.createElement("option");
+          option.value = id;
+          option.textContent = id;
+          option.selected = edge.source === id;
+          sourceSelect.appendChild(option);
+        });
+        sourceSelect.addEventListener("change", () => {
+          edge.source = sourceSelect.value;
+          renderEdges();
+          syncHidden();
+        });
+
+        const targetSelect = document.createElement("select");
+        edgeOptions("target").forEach((id) => {
+          const option = document.createElement("option");
+          option.value = id;
+          option.textContent = id;
+          option.selected = edge.target === id;
+          targetSelect.appendChild(option);
+        });
+        targetSelect.addEventListener("change", () => {
+          edge.target = targetSelect.value;
+          renderEdges();
+          syncHidden();
+        });
+
+        const removeBtn = document.createElement("button");
+        removeBtn.type = "button";
+        removeBtn.className = "btn btn-sm btn-ghost";
+        removeBtn.textContent = "Remove";
+        removeBtn.addEventListener("click", () => {
+          state.edges = state.edges.filter((item) => item !== edge);
+          renderEdgesTable();
+          renderEdges();
+          syncHidden();
+        });
+
+        sourceTd.appendChild(sourceSelect);
+        targetTd.appendChild(targetSelect);
+        actionTd.appendChild(removeBtn);
+        tr.append(sourceTd, targetTd, actionTd);
+        edgesTbody.appendChild(tr);
+      });
+    }
+
+    function refreshInspectorOptions() {
+      inspector.agent.innerHTML = "";
+      const agentEmpty = document.createElement("option");
+      agentEmpty.value = "";
+      agentEmpty.textContent = "Select agent";
+      inspector.agent.appendChild(agentEmpty);
+      agentOptions.forEach((agent) => {
+        const option = document.createElement("option");
+        option.value = String(agent.id);
+        option.textContent = `${agent.name} (${agent.slug})`;
+        inspector.agent.appendChild(option);
+      });
+
+      inspector.model.innerHTML = "";
+      const modelEmpty = document.createElement("option");
+      modelEmpty.value = "";
+      modelEmpty.textContent = "Select model";
+      inspector.model.appendChild(modelEmpty);
+      modelOptions.forEach((model) => {
+        const option = document.createElement("option");
+        option.value = String(model.id);
+        option.textContent = `${model.name} (${model.slug})`;
+        inspector.model.appendChild(option);
+      });
+
+      inspector.credential.innerHTML = "";
+      const credentialEmpty = document.createElement("option");
+      credentialEmpty.value = "";
+      credentialEmpty.textContent = "Select credential";
+      inspector.credential.appendChild(credentialEmpty);
+      credentialOptions.forEach((credential) => {
+        const option = document.createElement("option");
+        option.value = String(credential.id);
+        option.textContent = `${credential.name} · ${credential.provider}`;
+        inspector.credential.appendChild(option);
+      });
+    }
+
+    function selectNode(id) {
+      state.selectedNodeId = id;
+      const node = id ? state.nodes.get(id) : null;
+      inspector.current.textContent = node ? node.id : "none";
+      inspector.nodeId.value = node ? node.id : "";
+      inspector.agent.value = node ? String(node.agent_id || "") : "";
+      inspector.model.value = node ? String(node.model_id || "") : "";
+      inspector.credential.value = node ? String(node.credential_id || "") : "";
+      inspector.prompt.value = node ? node.prompt : "";
+      renderNodes();
+    }
+
+    function syncHidden() {
+      const payload = {
+        nodes: Array.from(state.nodes.values()).map((node) => ({
+          id: node.id,
+          agent_id: node.agent_id,
+          model_id: node.model_id,
+          credential_id: node.credential_id,
+          prompt: node.prompt,
+          x: Math.round(node.x),
+          y: Math.round(node.y)
+        })),
+        edges: state.edges.map((edge) => ({ source: edge.source, target: edge.target }))
+      };
+      hiddenPayload.value = JSON.stringify(payload);
+    }
+
+    function applyViewport() {
+      const { scale, offsetX, offsetY } = state.viewport;
+      stage.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
+    }
+
+    function onCanvasWheel(event) {
+      event.preventDefault();
+      const prevScale = state.viewport.scale;
+      const zoomFactor = event.deltaY < 0 ? 1.12 : 0.9;
+      const nextScale = Math.max(
+        state.viewport.min,
+        Math.min(state.viewport.max, prevScale * zoomFactor)
+      );
+      if (nextScale === prevScale) return;
+      const anchor = screenToStage(event.clientX, event.clientY);
+      const canvasRect = canvas.getBoundingClientRect();
+      state.viewport.scale = nextScale;
+      state.viewport.offsetX =
+        event.clientX - canvasRect.left - anchor.x * nextScale;
+      state.viewport.offsetY =
+        event.clientY - canvasRect.top - anchor.y * nextScale;
+      applyViewport();
+      renderEdges();
+    }
+
+    function clientValidate() {
+      if (!state.nodes.size) return "Add at least one node.";
+      if (!state.edges.length) return "Add at least one connection.";
+      for (const node of state.nodes.values()) {
+        if (!validNodeId(node.id)) return `Invalid node ID format: ${node.id}`;
+        if (!node.agent_id) return `Select an agent for node ${node.id}.`;
+        if (!node.model_id) return `Select a model for node ${node.id}.`;
+        if (!node.credential_id) return `Select a credential for node ${node.id}.`;
+      }
+      const startCount = state.edges.filter((edge) => edge.source === "__start__").length;
+      const endCount = state.edges.filter((edge) => edge.target === "__end__").length;
+      if (!startCount) return "At least one edge must start from __start__.";
+      if (!endCount) return "At least one edge must end at __end__.";
+      return "";
+    }
+
+    async function boot() {
+      refreshInspectorOptions();
+
+      for (const item of (initial.nodes || [])) {
+        await addNode(item);
+      }
+      if (!state.nodes.size) {
+        await addNode({ id: "node-1", x: 280, y: 170 });
+      }
+
+      for (const edge of (initial.edges || [])) {
+        const source = String(edge.source || "");
+        const target = String(edge.target || "");
+        await addEdge(source, target);
+      }
+      if (!state.edges.length) {
+        const first = Array.from(state.nodes.keys())[0];
+        if (first) {
+          await addEdge("__start__", first);
+          await addEdge(first, "__end__");
+        }
+      }
+
+      renderNodes();
+      renderEdgesTable();
+      selectNode(Array.from(state.nodes.keys())[0] || null);
+      applyViewport();
+      syncHidden();
+    }
+
+    byId("add-flow-node")?.addEventListener("click", async () => {
+      const id = uniqueNodeId("node");
+      await addNode({ id, x: 260 + state.nodes.size * 24, y: 140 + state.nodes.size * 16 });
+      renderNodes();
+      renderEdgesTable();
+      selectNode(id);
+      syncHidden();
+    });
+
+    byId("add-flow-edge")?.addEventListener("click", async () => {
+      const first = Array.from(state.nodes.keys())[0];
+      if (!first) return;
+      await addEdge("__start__", first);
+      renderEdgesTable();
+      renderEdges();
+      syncHidden();
+    });
+
+    canvas
+      ?.querySelector('[data-socket-id="__start__"][data-socket-role="out"]')
+      ?.addEventListener("pointerdown", (event) => {
+        beginConnectionDrag("__start__", event);
+      });
+
+    inspector.nodeId?.addEventListener("change", () => {
+      if (!state.selectedNodeId) return;
+      const node = state.nodes.get(state.selectedNodeId);
+      if (!node) return;
+      const nextId = String(inspector.nodeId.value || "").trim();
+      if (!validNodeId(nextId)) {
+        statusEl.textContent = "invalid node id";
+        inspector.nodeId.value = node.id;
+        return;
+      }
+      if (nextId !== node.id && state.nodes.has(nextId)) {
+        statusEl.textContent = "duplicate node id";
+        inspector.nodeId.value = node.id;
+        return;
+      }
+      if (nextId === node.id) return;
+      state.nodes.delete(node.id);
+      node.id = nextId;
+      state.nodes.set(node.id, node);
+      state.edges.forEach((edge) => {
+        if (edge.source === state.selectedNodeId) edge.source = nextId;
+        if (edge.target === state.selectedNodeId) edge.target = nextId;
+      });
+      state.selectedNodeId = nextId;
+      statusEl.textContent = "ready";
+      renderEdgesTable();
+      selectNode(nextId);
+      syncHidden();
+    });
+
+    inspector.agent?.addEventListener("change", () => {
+      const node = state.selectedNodeId ? state.nodes.get(state.selectedNodeId) : null;
+      if (!node) return;
+      node.agent_id = inspector.agent.value;
+      renderNodes();
+      syncHidden();
+    });
+
+    inspector.model?.addEventListener("change", () => {
+      const node = state.selectedNodeId ? state.nodes.get(state.selectedNodeId) : null;
+      if (!node) return;
+      node.model_id = inspector.model.value;
+      renderNodes();
+      syncHidden();
+    });
+
+    inspector.credential?.addEventListener("change", () => {
+      const node = state.selectedNodeId ? state.nodes.get(state.selectedNodeId) : null;
+      if (!node) return;
+      node.credential_id = inspector.credential.value;
+      renderNodes();
+      syncHidden();
+    });
+
+    inspector.prompt?.addEventListener("input", () => {
+      const node = state.selectedNodeId ? state.nodes.get(state.selectedNodeId) : null;
+      if (!node) return;
+      node.prompt = inspector.prompt.value;
+      syncHidden();
+    });
+
+    inspector.deleteBtn?.addEventListener("click", () => {
+      if (!state.selectedNodeId) return;
+      const deleting = state.selectedNodeId;
+      removeNode(deleting);
+      renderNodes();
+      renderEdgesTable();
+      selectNode(Array.from(state.nodes.keys())[0] || null);
+      syncHidden();
+    });
+
+    form?.addEventListener("submit", (event) => {
+      const message = clientValidate();
+      if (message) {
+        event.preventDefault();
+        statusEl.textContent = message;
+        return;
+      }
+      statusEl.textContent = "saving";
+      syncHidden();
+    });
+
+    window.addEventListener("resize", () => renderEdges());
+    canvas?.addEventListener("wheel", onCanvasWheel, { passive: false });
+    boot().catch((error) => {
+      statusEl.textContent = `editor error: ${error}`;
+    });
+  </script>
+{% endblock %}

@@ -75,6 +75,7 @@
           {% include "ctf/_stats_overview.html" with stats=stats %}
           <div class="breakdown-grid">
             {% include "ctf/_breakdown.html" with title="By agent" rows=stats.by_agent total=stats.total %}
+            {% include "ctf/_breakdown.html" with title="By flow" rows=stats.by_flow total=stats.total %}
             {% include "ctf/_breakdown.html" with title="By model" rows=stats.by_model total=stats.total label_class="mono" %}
             {% include "ctf/_breakdown.html" with title="By provider" rows=stats.by_provider total=stats.total %}
           </div>
@@ -96,6 +97,13 @@
                 {% if thread.agent %}
                   <span class="idx-desc">
                     <span class="mono muted">{{ thread.agent.name }}</span>
+                    {% if thread.model %} <span class="muted">·</span> <span class="mono muted">{{ thread.model.name }}</span>{% endif %}
+                    {% if thread.can_show_credential %} <span class="muted">·</span> <span class="mono muted">{{ thread.credential.name }}</span>{% endif %}
+                  </span>
+                {% endif %}
+                {% if thread.flow %}
+                  <span class="idx-desc">
+                    <span class="mono muted">{{ thread.flow.name }}</span>
                     {% if thread.model %} <span class="muted">·</span> <span class="mono muted">{{ thread.model.name }}</span>{% endif %}
                     {% if thread.can_show_credential %} <span class="muted">·</span> <span class="mono muted">{{ thread.credential.name }}</span>{% endif %}
                   </span>
@@ -125,7 +133,48 @@
                   action="{% url 'ctf:thread_create' ctf.slug challenge.challenge_id %}"
                   class="editorial">
               {% csrf_token %}
-              {{ thread_form.as_p }}
+              {% if thread_form.non_field_errors %}
+                <ul class="errorlist" style="margin-bottom: 16px;">
+                  {% for error in thread_form.non_field_errors %}<li>{{ error }}</li>{% endfor %}
+                </ul>
+              {% endif %}
+
+              <p>
+                {{ thread_form.name.label_tag }}
+                {{ thread_form.name }}
+                {% if thread_form.name.help_text %}<span class="helptext">{{ thread_form.name.help_text|safe }}</span>{% endif %}
+                {% if thread_form.name.errors %}<ul class="errorlist">{% for e in thread_form.name.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+              </p>
+              <p>
+                {{ thread_form.runtime.label_tag }}
+                {{ thread_form.runtime }}
+                {% if thread_form.runtime.help_text %}<span class="helptext">{{ thread_form.runtime.help_text|safe }}</span>{% endif %}
+                {% if thread_form.runtime.errors %}<ul class="errorlist">{% for e in thread_form.runtime.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+              </p>
+              <p id="thread-agent-row">
+                {{ thread_form.agent.label_tag }}
+                {{ thread_form.agent }}
+                {% if thread_form.agent.help_text %}<span class="helptext">{{ thread_form.agent.help_text|safe }}</span>{% endif %}
+                {% if thread_form.agent.errors %}<ul class="errorlist">{% for e in thread_form.agent.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+              </p>
+              <p id="thread-flow-row">
+                {{ thread_form.flow.label_tag }}
+                {{ thread_form.flow }}
+                {% if thread_form.flow.help_text %}<span class="helptext">{{ thread_form.flow.help_text|safe }}</span>{% endif %}
+                {% if thread_form.flow.errors %}<ul class="errorlist">{% for e in thread_form.flow.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+              </p>
+              <p id="thread-model-row">
+                {{ thread_form.model.label_tag }}
+                {{ thread_form.model }}
+                {% if thread_form.model.help_text %}<span class="helptext">{{ thread_form.model.help_text|safe }}</span>{% endif %}
+                {% if thread_form.model.errors %}<ul class="errorlist">{% for e in thread_form.model.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+              </p>
+              <p id="thread-credential-row">
+                {{ thread_form.credential.label_tag }}
+                {{ thread_form.credential }}
+                {% if thread_form.credential.help_text %}<span class="helptext">{{ thread_form.credential.help_text|safe }}</span>{% endif %}
+                {% if thread_form.credential.errors %}<ul class="errorlist">{% for e in thread_form.credential.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+              </p>
               <button type="submit" class="btn btn-primary btn-block" style="margin-top: 8px;">
                 Run thread
               </button>
@@ -149,4 +198,37 @@
       .challenge-grid { grid-template-columns: 1fr; gap: 32px; }
     }
   </style>
+{% endblock %}
+
+{% block scripts %}
+  {{ block.super }}
+  <script>
+    (function () {
+      const runtime = document.getElementById("id_runtime");
+      const agentRow = document.getElementById("thread-agent-row");
+      const flowRow = document.getElementById("thread-flow-row");
+      const modelRow = document.getElementById("thread-model-row");
+      const credentialRow = document.getElementById("thread-credential-row");
+      const agent = document.getElementById("id_agent");
+      const flow = document.getElementById("id_flow");
+      const model = document.getElementById("id_model");
+      const credential = document.getElementById("id_credential");
+      if (!runtime || !agentRow || !flowRow || !modelRow || !credentialRow || !agent || !flow || !model || !credential) return;
+
+      const updateRuntimeRows = () => {
+        const isFlow = runtime.value === "flow";
+        agentRow.style.display = isFlow ? "none" : "";
+        flowRow.style.display = isFlow ? "" : "none";
+        modelRow.style.display = isFlow ? "none" : "";
+        credentialRow.style.display = isFlow ? "none" : "";
+        agent.disabled = isFlow;
+        flow.disabled = !isFlow;
+        model.disabled = isFlow;
+        credential.disabled = isFlow;
+      };
+
+      runtime.addEventListener("change", updateRuntimeRows);
+      updateRuntimeRows();
+    })();
+  </script>
 {% endblock %}

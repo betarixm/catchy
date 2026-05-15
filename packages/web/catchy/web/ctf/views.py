@@ -38,6 +38,7 @@ from .forms import (
     ChallengeForm,
     CredentialForm,
     CtfForm,
+    FlowConfigurationForm,
     ModelConfigurationForm,
     ModelPricingForm,
     ProviderForm,
@@ -48,6 +49,7 @@ from .models import (
     Challenge,
     Credential,
     Ctf,
+    FlowConfiguration,
     ModelConfiguration,
     ModelPricing,
     Provider,
@@ -58,6 +60,7 @@ from .models import (
 from .services import (
     APP_EVENT_FORMAT,
     build_agent_configuration,
+    build_flow_configuration,
     cached_token_usage_cost_usd,
     fork_thread,
     start_thread,
@@ -122,6 +125,7 @@ def _thread_stats(threads: list[Thread]) -> dict[str, Any]:
     """
     by_status: dict[str, int] = {}
     by_agent: dict[str, dict[str, Any]] = {}
+    by_flow: dict[str, dict[str, Any]] = {}
     by_model: dict[str, dict[str, Any]] = {}
     by_provider: dict[str, dict[str, Any]] = {}
     by_credential: dict[str, dict[str, Any]] = {}
@@ -142,6 +146,7 @@ def _thread_stats(threads: list[Thread]) -> dict[str, Any]:
             has_cost = True
 
         agent_name = thread.agent.name if thread.agent_id else "—"
+        flow_name = thread.flow.name if thread.flow_id else "—"
         model_name = thread.model.name if thread.model_id else "—"
         if thread.credential_id and thread.credential is not None:
             provider_name = (
@@ -158,6 +163,7 @@ def _thread_stats(threads: list[Thread]) -> dict[str, Any]:
 
         for bucket, key in (
             (by_agent, agent_name),
+            (by_flow, flow_name),
             (by_model, model_name),
             (by_provider, provider_name),
             (by_credential, credential_name),
@@ -185,6 +191,7 @@ def _thread_stats(threads: list[Thread]) -> dict[str, Any]:
         "earliest": earliest,
         "latest": latest,
         "by_agent": _sorted_breakdown(by_agent),
+        "by_flow": _sorted_breakdown(by_flow),
         "by_model": _sorted_breakdown(by_model),
         "by_provider": _sorted_breakdown(by_provider),
         "by_credential": _sorted_breakdown(by_credential),
@@ -290,6 +297,7 @@ def index(request: HttpRequest) -> HttpResponse:
             "ctf",
             "challenge",
             "agent",
+            "flow",
             "model",
             "credential",
             "credential__provider",
@@ -309,6 +317,7 @@ def index(request: HttpRequest) -> HttpResponse:
                     "ctf",
                     "challenge",
                     "agent",
+                    "flow",
                     "model",
                     "credential",
                     "credential__provider",
@@ -660,6 +669,283 @@ def agent_detail(request: HttpRequest, slug: str) -> HttpResponse:
 
 
 @login_required
+def flow_list(request: HttpRequest) -> HttpResponse:
+    flows = [
+        flow
+        for flow in FlowConfiguration.objects.prefetch_related("view_groups")
+        if flow.can_view(request.user)
+    ]
+    usage_map = _thread_counts_by(Thread.objects.values("flow_id"), "flow_id")
+    for flow in flows:
+        flow.thread_count = usage_map.get(flow.pk, 0)
+    list_stats = {
+        "count": len(flows),
+        "thread_total": sum(f.thread_count for f in flows),
+        "active": sum(1 for f in flows if f.thread_count),
+    }
+    return render(
+        request, "ctf/flow_list.html", {"flows": flows, "list_stats": list_stats}
+    )
+
+
+@login_required
+def flow_create(request: HttpRequest) -> HttpResponse:
+    form = FlowConfigurationForm(request.POST or None, user=request.user)
+    if request.method == "POST" and form.is_valid():
+        flow = form.save(commit=False)
+        flow.created_by = request.user
+        flow.save()
+        form.save_m2m()
+        messages.success(request, "Flow configuration saved.")
+        return redirect(flow)
+    return render(
+        request,
+        "ctf/flow_form.html",
+        {
+            "form": form,
+            "title": "New flow",
+            "editor_agents": form.editor_agents,
+            "editor_models": form.editor_models,
+            "editor_credentials": form.editor_credentials,
+            "editor_initial_graph": form.editor_initial_graph,
+        },
+    )
+
+
+@login_required
+def flow_update(request: HttpRequest, slug: str) -> HttpResponse:
+    flow = get_object_or_404(FlowConfiguration, slug=slug)
+    if not flow.can_view(request.user):
+        raise PermissionDenied
+
+    form = FlowConfigurationForm(request.POST or None, instance=flow, user=request.user)
+    if request.method == "POST" and form.is_valid():
+        flow = form.save()
+        messages.success(request, "Flow configuration updated.")
+        return redirect(flow)
+    return render(
+        request,
+        "ctf/flow_form.html",
+        {
+            "form": form,
+            "title": f"Edit flow: {flow.name}",
+            "editor_agents": form.editor_agents,
+            "editor_models": form.editor_models,
+            "editor_credentials": form.editor_credentials,
+            "editor_initial_graph": form.editor_initial_graph,
+        },
+    )
+
+
+@login_required
+def flow_detail(request: HttpRequest, slug: str) -> HttpResponse:
+    flow = get_object_or_404(FlowConfiguration, slug=slug)
+    if not flow.can_view(request.user):
+        raise PermissionDenied
+    flow_graph = _flow_graph_view_data(flow, user=request.user)
+    resolves = False
+    try:
+        flow.resolved_mapping(user=request.user)
+        resolves = True
+    except Exception as exc:
+        messages.error(request, f"Could not resolve YAML: {exc}")
+    flow_threads = _attach_thread_costs(
+        Thread.objects.filter(flow=flow).select_related("model")
+    )
+    stats = _thread_stats(flow_threads)
+    return render(
+        request,
+        "ctf/flow_detail.html",
+        {
+            "flow": flow,
+            "resolves": resolves,
+            "thread_stats": stats,
+            "flow_graph": flow_graph,
+        },
+    )
+
+
+def _flow_graph_view_data(flow: FlowConfiguration, *, user: Any) -> dict[str, Any]:
+    try:
+        mapping = flow.resolved_mapping(user=user)
+    except Exception:
+        return {"nodes": [], "edges": []}
+
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, str]] = []
+    nodes_raw = mapping.get("nodes")
+    edges_raw = mapping.get("edges")
+    if isinstance(nodes_raw, list) and isinstance(edges_raw, list):
+        agent_ids: set[int] = set()
+        model_ids: set[int] = set()
+        credential_ids: set[int] = set()
+        for item in nodes_raw:
+            if not isinstance(item, dict):
+                continue
+            agent_id = _int_or_none(item.get("agent"))
+            model_id = _int_or_none(item.get("model"))
+            credential_id = _int_or_none(item.get("credential"))
+            if agent_id:
+                agent_ids.add(agent_id)
+            if model_id:
+                model_ids.add(model_id)
+            if credential_id:
+                credential_ids.add(credential_id)
+
+        agent_map = {
+            agent.pk: agent
+            for agent in AgentConfiguration.objects.filter(pk__in=agent_ids)
+        }
+        model_map = {
+            model.pk: model for model in ModelConfiguration.objects.filter(pk__in=model_ids)
+        }
+        credential_map = {
+            credential.pk: credential
+            for credential in Credential.objects.select_related("provider").filter(
+                pk__in=credential_ids
+            )
+        }
+
+        for index, item in enumerate(nodes_raw):
+            if not isinstance(item, dict):
+                continue
+            node_id = str(item.get("id") or item.get("name") or "").strip()
+            if not node_id:
+                node_id = f"node-{index + 1}"
+            agent_id = _int_or_none(item.get("agent"))
+            model_id = _int_or_none(item.get("model"))
+            credential_id = _int_or_none(item.get("credential"))
+            agent = agent_map.get(agent_id) if agent_id else None
+            model = model_map.get(model_id) if model_id else None
+            credential = credential_map.get(credential_id) if credential_id else None
+            provider_name = (
+                credential.provider.name
+                if credential is not None and credential.provider_id
+                else ""
+            )
+            nodes.append(
+                {
+                    "id": node_id,
+                    "agent": agent.name if agent is not None else "—",
+                    "model": model.name if model is not None else "—",
+                    "credential": (
+                        f"{credential.name} · {provider_name}"
+                        if credential is not None and provider_name
+                        else (credential.name if credential is not None else "—")
+                    ),
+                    "prompt": str(item.get("prompt") or ""),
+                    "x": _int_or_none(item.get("x")),
+                    "y": _int_or_none(item.get("y")),
+                }
+            )
+        edges = _normalize_graph_edges(edges_raw)
+        _apply_flow_graph_layout(nodes, edges)
+        return {"nodes": nodes, "edges": edges}
+
+    agents_raw = mapping.get("agents")
+    if isinstance(agents_raw, list) and isinstance(edges_raw, list):
+        for index, item in enumerate(agents_raw):
+            if not isinstance(item, dict):
+                continue
+            node_id = str(item.get("id") or f"node-{index + 1}")
+            model_data = item.get("model")
+            model_name = (
+                str(model_data.get("name") or "—")
+                if isinstance(model_data, dict)
+                else "—"
+            )
+            credential_data = item.get("credential")
+            credential_name = "configured" if isinstance(credential_data, dict) else "—"
+            prompt_data = item.get("prompt")
+            prompt_text = ""
+            if isinstance(prompt_data, dict):
+                prompt_text = str(prompt_data.get("user") or "")
+            elif isinstance(prompt_data, str):
+                prompt_text = prompt_data
+            nodes.append(
+                {
+                    "id": node_id,
+                    "agent": str(item.get("class") or "configured"),
+                    "model": model_name,
+                    "credential": credential_name,
+                    "prompt": prompt_text,
+                    "x": None,
+                    "y": None,
+                }
+            )
+        edges = _normalize_graph_edges(edges_raw)
+        _apply_flow_graph_layout(nodes, edges)
+        return {"nodes": nodes, "edges": edges}
+
+    return {"nodes": [], "edges": []}
+
+
+def _normalize_graph_edges(edges_raw: list[Any]) -> list[dict[str, str]]:
+    edges: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for edge in edges_raw:
+        if isinstance(edge, dict):
+            source = str(edge.get("source") or "").strip()
+            target = str(edge.get("target") or "").strip()
+        elif isinstance(edge, (list, tuple)) and len(edge) == 2:
+            source = str(edge[0] or "").strip()
+            target = str(edge[1] or "").strip()
+        else:
+            continue
+        if not source or not target:
+            continue
+        pair = (source, target)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        edges.append({"source": source, "target": target})
+    return edges
+
+
+def _apply_flow_graph_layout(nodes: list[dict[str, Any]], edges: list[dict[str, str]]) -> None:
+    if not nodes:
+        return
+    node_ids = [str(node["id"]) for node in nodes]
+    levels: dict[str, int] = {}
+    queue: list[str] = [edge["target"] for edge in edges if edge["source"] == "__start__"]
+    for node_id in queue:
+        if node_id in node_ids:
+            levels[node_id] = 0
+    while queue:
+        current = queue.pop(0)
+        level = levels.get(current, 0)
+        for edge in edges:
+            if edge["source"] != current:
+                continue
+            target = edge["target"]
+            if target in {"__end__", "__start__"} or target not in node_ids:
+                continue
+            candidate = level + 1
+            if target not in levels or candidate > levels[target]:
+                levels[target] = candidate
+                queue.append(target)
+
+    rows_per_level: dict[int, int] = {}
+    for index, node in enumerate(nodes):
+        if node.get("x") is not None and node.get("y") is not None:
+            continue
+        node_id = str(node["id"])
+        level = levels.get(node_id, 0)
+        row = rows_per_level.get(level, 0)
+        rows_per_level[level] = row + 1
+        node["x"] = 260 + level * 240
+        node["y"] = 110 + row * 150 + (index % 2) * 4
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        parsed = int(cast(Any, value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+@login_required
 def ctf_create(request: HttpRequest) -> HttpResponse:
     form = CtfForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
@@ -701,7 +987,7 @@ def ctf_detail(request: HttpRequest, slug: str) -> HttpResponse:
 
     challenges = list(ctf.challenges.all())
     ctf_threads = _attach_thread_costs(
-        Thread.objects.filter(ctf=ctf).select_related("model")
+        Thread.objects.filter(ctf=ctf).select_related("model", "flow")
     )
     stats = _thread_stats(ctf_threads)
     stats["challenge_count"] = len(challenges)
@@ -783,7 +1069,7 @@ def challenge_detail(
     threads = _attach_thread_costs(
         _attach_credential_visibility(
             challenge.threads.select_related(
-                "agent", "model", "credential", "credential__provider"
+                "agent", "flow", "model", "credential", "credential__provider"
             ).prefetch_related(
                 "credential__allowed_groups", "credential__allowed_users"
             ),
@@ -820,33 +1106,56 @@ def thread_create(
         messages.error(request, "Could not start thread.")
         return redirect(challenge)
 
+    runtime = form.cleaned_data["runtime"]
     agent = form.cleaned_data["agent"]
-    if not agent.can_use(request.user):
+    flow = form.cleaned_data["flow"]
+    if runtime == ThreadCreateForm.Runtime.AGENT:
+        if agent is None or not agent.can_use(request.user):
+            raise PermissionDenied
+    elif runtime == ThreadCreateForm.Runtime.FLOW:
+        if flow is None or not flow.can_use(request.user):
+            raise PermissionDenied
+    else:
         raise PermissionDenied
     model = form.cleaned_data["model"]
-    if not model.can_use(request.user):
-        raise PermissionDenied
     credential = form.cleaned_data["credential"]
-    if not credential.can_use(request.user):
-        raise PermissionDenied
+    if runtime == ThreadCreateForm.Runtime.AGENT:
+        if model is None or not model.can_use(request.user):
+            raise PermissionDenied
+        if credential is None or not credential.can_use(request.user):
+            raise PermissionDenied
 
     try:
-        build_agent_configuration(
-            agent,
-            model_configuration=model,
-            credential=credential,
-            user=request.user,
-        )
+        if runtime == ThreadCreateForm.Runtime.FLOW:
+            if flow is None:
+                raise PermissionDenied
+            build_flow_configuration(
+                flow,
+                model_configuration=None,
+                credential=None,
+                user=request.user,
+            )
+        else:
+            if agent is None:
+                raise PermissionDenied
+            build_agent_configuration(
+                agent,
+                model_configuration=model,
+                credential=credential,
+                user=request.user,
+            )
     except PermissionDenied:
         raise
     except Exception as exc:
-        messages.error(request, f"Could not resolve agent configuration: {exc}")
+        item = "flow" if runtime == ThreadCreateForm.Runtime.FLOW else "agent"
+        messages.error(request, f"Could not resolve {item} configuration: {exc}")
         return redirect(challenge)
 
     thread = Thread.objects.create(
         ctf=ctf,
         challenge=challenge,
         agent=agent,
+        flow=flow,
         model=model,
         credential=credential,
         created_by=request.user,
@@ -860,7 +1169,13 @@ def thread_create(
 def thread_detail(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     thread = get_object_or_404(
         Thread.objects.select_related(
-            "ctf", "challenge", "agent", "model", "credential", "credential__provider"
+            "ctf",
+            "challenge",
+            "agent",
+            "flow",
+            "model",
+            "credential",
+            "credential__provider",
         ).prefetch_related("credential__allowed_groups", "credential__allowed_users"),
         uuid=thread_uuid,
     )
@@ -893,6 +1208,7 @@ def thread_detail(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
             "events_json": _event_payloads(events, thread=thread),
             "can_manage_thread": can_manage_thread,
             "can_prompt_thread": can_manage_thread
+            and thread.agent_id is not None
             and thread.status in promptable_statuses,
             "can_stop_thread": can_manage_thread
             and thread.status in stoppable_statuses,
@@ -923,6 +1239,9 @@ def thread_steer(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     thread = get_object_or_404(Thread.objects.select_related("ctf"), uuid=thread_uuid)
     if not thread.can_interact(request.user):
         raise PermissionDenied
+    if thread.flow_id is not None:
+        messages.error(request, "Flow threads do not support steering yet.")
+        return redirect(thread)
 
     text = request.POST.get("text", "").strip()
     if not text:
@@ -1018,7 +1337,7 @@ def thread_stop(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
 def thread_fork(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     thread = get_object_or_404(
         Thread.objects.select_related(
-            "ctf", "challenge", "agent", "model", "credential", "created_by"
+            "ctf", "challenge", "agent", "flow", "model", "credential", "created_by"
         ),
         uuid=thread_uuid,
     )
@@ -1050,7 +1369,13 @@ def thread_stream(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
 def thread_handoff_markdown(request: HttpRequest, thread_uuid: UUID) -> HttpResponse:
     thread = get_object_or_404(
         Thread.objects.select_related(
-            "ctf", "challenge", "agent", "model", "credential", "credential__provider"
+            "ctf",
+            "challenge",
+            "agent",
+            "flow",
+            "model",
+            "credential",
+            "credential__provider",
         ),
         uuid=thread_uuid,
     )
@@ -1130,7 +1455,12 @@ def _event_stream(thread_id: int, last_sequence: int = 0) -> Iterator[str]:
 
     while True:
         thread = Thread.objects.select_related(
-            "agent", "model", "credential", "credential__provider", "created_by"
+            "agent",
+            "flow",
+            "model",
+            "credential",
+            "credential__provider",
+            "created_by",
         ).get(pk=thread_id)
         for event in _events_after(thread_id, last_sequence):
             last_sequence = event.pk or last_sequence
@@ -1379,7 +1709,7 @@ def _thread_handoff_markdown(thread: Thread) -> str:
         f"- UUID: {thread.uuid}",
         f"- CTF: {thread.ctf.slug}",
         f"- Challenge: {thread.challenge.challenge_id}",
-        f"- Agent: {thread.agent.slug}",
+        f"- Runtime: {thread.flow.slug if thread.flow_id else thread.agent.slug if thread.agent_id else 'unknown'}",
         f"- Model: {thread.model.name if thread.model is not None else 'unknown'}",
         f"- Status: {thread.status}",
         "",

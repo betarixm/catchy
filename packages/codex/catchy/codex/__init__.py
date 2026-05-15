@@ -7,7 +7,7 @@ import tarfile
 import tomllib
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated, AsyncGenerator, Iterator, Literal
+from typing import Annotated, Any, AsyncGenerator, Iterator, Literal
 
 import tomli_w
 from catchy.core.agent.models import (
@@ -207,11 +207,12 @@ class CodexEvent(Event[NotificationValue]):
 
 
 class CodexAgent(Agent[Notification]):
-    key: str = "codex"
+    tag: str = "codex"
 
     @staticmethod
-    def from_configuration(configuration: Configuration) -> CodexAgent:
-        match configuration.credential:
+    def from_configuration(configuration: dict[str, Any]) -> CodexAgent:
+        rendered_configuration = Configuration.model_validate(configuration)
+        match rendered_configuration.credential:
             case _OpenAICompatibleApiKeyCredential() as credential:
                 auth_json_string = json.dumps(
                     {
@@ -231,17 +232,19 @@ class CodexAgent(Agent[Notification]):
                 auth_json_string = credential.json_string
 
         return CodexAgent(
-            id=configuration.id,
-            model_name=configuration.model.name,
-            container_challenge_directory=configuration.directory.challenge,
-            container_workspace_directory=configuration.directory.workspace,
-            container_metadata_directory=configuration.directory.metadata,
-            docker_image=configuration.container.image,
-            docker_client=DockerClient(base_url=configuration.container.socket),
-            user_prompt_template=configuration.prompt.user,
-            model_base_url=configuration.credential.base_url,
+            id=rendered_configuration.id,
+            model_name=rendered_configuration.model.name,
+            container_challenge_directory=rendered_configuration.directory.challenge,
+            container_workspace_directory=rendered_configuration.directory.workspace,
+            container_metadata_directory=rendered_configuration.directory.metadata,
+            docker_image=rendered_configuration.container.image,
+            docker_client=DockerClient(
+                base_url=rendered_configuration.container.socket
+            ),
+            user_prompt_template=rendered_configuration.prompt.user,
+            model_base_url=rendered_configuration.credential.base_url,
             auth_json_string=auth_json_string,
-            docker_socket=configuration.container.socket,
+            docker_socket=rendered_configuration.container.socket,
         )
 
     def __init__(
@@ -559,6 +562,21 @@ class CodexAgent(Agent[Notification]):
         if not container.put_archive(directory, archive_buffer.getvalue()):  # pyright: ignore[reportUnknownMemberType]
             raise RuntimeError(f"failed to copy Codex configuration into {directory}")
 
+    def last_agent_message_from_events(self, events: list[Event[Notification]]) -> str:
+        message_parts: list[str] = []
+        for event in reversed(events):
+            for component in reversed(list(CodexEventRenderer().render(event))):
+                match component:
+                    case Delta(tag="agent", text=text):
+                        message_parts.append(text)
+                    case _:
+                        if message_parts:
+                            break
+            if message_parts:
+                break
+
+        return "".join(reversed(message_parts))
+
 
 class CodexEventRenderer(EventRenderer[Notification]):
     def __init__(
@@ -704,7 +722,16 @@ class CodexHandoffExporter(HandoffExporter[Notification]):
                     flush_pending()
                     pending_label = label
                     pending_text = delta.text
-                case TextLog() | JsonLog() | TokenUsage() | ItemCompleted() | TurnStarted() | TurnCompleted() | ThreadStarted() | Nop():
+                case (
+                    TextLog()
+                    | JsonLog()
+                    | TokenUsage()
+                    | ItemCompleted()
+                    | TurnStarted()
+                    | TurnCompleted()
+                    | ThreadStarted()
+                    | Nop()
+                ):
                     flush_pending()
         flush_pending()
         return "".join(chunks)

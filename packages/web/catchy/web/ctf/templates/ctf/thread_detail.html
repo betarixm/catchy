@@ -35,6 +35,7 @@
               <span class="pill pill-public">public</span>
             {% endif %}
             {% if thread.agent %}{{ thread.agent.name }}{% endif %}
+            {% if thread.flow %}{{ thread.flow.name }}{% endif %}
             {% if thread.model %}<span class="mute2">·</span> {{ thread.model.name }}{% endif %}
             {% if thread.can_show_credential %}<span class="mute2">·</span> {{ thread.credential.name }}{% endif %}
           </div>

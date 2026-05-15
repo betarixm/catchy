@@ -36,6 +36,7 @@ from catchy.web.ctf.forms import (
     ChallengeForm,
     CredentialForm,
     CtfForm,
+    FlowConfigurationForm,
     ModelConfigurationForm,
     ModelPricingForm,
     ProviderForm,
@@ -46,6 +47,7 @@ from catchy.web.ctf.models import (
     Challenge,
     Credential,
     Ctf,
+    FlowConfiguration,
     ModelConfiguration,
     ModelPricing,
     Provider,
@@ -553,6 +555,146 @@ class CredentialAgentPermissionTests(TestCase):
         self.assertIn(credential, form.fields["credential"].queryset)
 
 
+class FlowEditorFormTests(TestCase):
+    def setUp(self) -> None:
+        self.user = User.objects.create_user(username="flow-user", password="password")
+        self.agent = AgentConfiguration.objects.create(
+            name="Codex Agent",
+            slug="codex-agent",
+            yaml=(
+                "id: base-agent\n"
+                "class: catchy.codex.CodexAgent\n"
+                "model:\n"
+                "  name: gpt-5.5\n"
+            ),
+            created_by=self.user,
+        )
+        self.model = ModelConfiguration.objects.create(
+            name="gpt-5.5",
+            slug="gpt-5-5",
+            created_by=self.user,
+        )
+        self.credential = Credential.objects.create(
+            name="OpenAI Key",
+            slug="openai-key",
+            kind=Credential.Kind.OPENAI,
+            api_key="sk-test",
+        )
+
+    def test_flow_form_serializes_graph_payload_to_nodes_yaml(self) -> None:
+        payload = {
+            "nodes": [
+                {
+                    "id": "node-1",
+                    "agent_id": self.agent.pk,
+                    "model_id": self.model.pk,
+                    "credential_id": self.credential.pk,
+                    "prompt": "Scan the target carefully.",
+                    "x": 260,
+                    "y": 140,
+                },
+                {
+                    "id": "node-2",
+                    "agent_id": self.agent.pk,
+                    "model_id": self.model.pk,
+                    "credential_id": self.credential.pk,
+                    "prompt": "Write exploit PoC.",
+                    "x": 500,
+                    "y": 220,
+                },
+            ],
+            "edges": [
+                {"source": "__start__", "target": "node-1"},
+                {"source": "node-1", "target": "node-2"},
+                {"source": "node-2", "target": "__end__"},
+            ],
+        }
+        form = FlowConfigurationForm(
+            data={
+                "name": "Linear Flow",
+                "slug": "linear-flow",
+                "graph_payload": json.dumps(payload),
+            },
+            user=self.user,
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        yaml = str(form.cleaned_data["yaml"])
+        mapping = FlowConfiguration(yaml=yaml).resolved_mapping(user=self.user)
+        self.assertEqual(mapping["nodes"][0]["name"], "node-1")
+        self.assertEqual(mapping["nodes"][1]["name"], "node-2")
+        runtime = services.normalize_flow_runtime_mapping(mapping, user=self.user)
+        self.assertEqual(runtime["agents"][0]["id"], "node-1")
+        self.assertEqual(runtime["agents"][0]["model"]["name"], "gpt-5.5")
+        self.assertEqual(
+            runtime["agents"][0]["prompt"]["user"],
+            "Scan the target carefully.",
+        )
+        self.assertEqual(runtime["agents"][1]["prompt"]["user"], "Write exploit PoC.")
+        self.assertEqual(runtime["edges"][0], ("__start__", "node-1"))
+
+    def test_flow_update_view_uses_editor_template(self) -> None:
+        self.client.force_login(self.user)
+        flow = FlowConfiguration.objects.create(
+            name="Graph Flow",
+            slug="graph-flow",
+            yaml=(
+                "nodes:\n"
+                f"  - name: node-1\n"
+                f"    agent: {self.agent.pk}\n"
+                f"    model: {self.model.pk}\n"
+                f"    credential: {self.credential.pk}\n"
+                "    prompt: analyze\n"
+                "edges:\n"
+                "  - source: __start__\n"
+                "    target: node-1\n"
+                "  - source: node-1\n"
+                "    target: __end__\n"
+            ),
+            created_by=self.user,
+        )
+        response = self.client.get(
+            reverse("ctf:flow_update", kwargs={"slug": flow.slug})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Node Inspector")
+        self.assertContains(response, "id_graph_payload")
+        self.assertContains(response, "flow-editor-initial")
+        self.assertContains(response, "flow-editor-models")
+
+    def test_flow_detail_renders_graph_preview(self) -> None:
+        self.client.force_login(self.user)
+        flow = FlowConfiguration.objects.create(
+            name="Graph Preview",
+            slug="graph-preview",
+            yaml=(
+                "nodes:\n"
+                f"  - name: node-1\n"
+                f"    agent: {self.agent.pk}\n"
+                f"    model: {self.model.pk}\n"
+                f"    credential: {self.credential.pk}\n"
+                "    prompt: inspect\n"
+                "edges:\n"
+                "  - source: __start__\n"
+                "    target: node-1\n"
+                "  - source: node-1\n"
+                "    target: __end__\n"
+            ),
+            created_by=self.user,
+        )
+
+        response = self.client.get(
+            reverse("ctf:flow_detail", kwargs={"slug": flow.slug})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Flow Graph")
+        self.assertContains(response, "flow-view-graph")
+        self.assertContains(response, "__start__")
+        self.assertContains(response, "__end__")
+
+
 class ChallengeSourceFormTests(TestCase):
     def setUp(self) -> None:
         self.ctf = Ctf.objects.create(title="Study", slug="study")
@@ -701,6 +843,18 @@ class ThreadCreateNameTests(TestCase):
             slug="codex",
             yaml="{}",
         )
+        self.flow = FlowConfiguration.objects.create(
+            name="Flow",
+            slug="flow",
+            yaml=(
+                "agents:\n"
+                "  - id: node-1\n"
+                "    class: CodexAgent\n"
+                "edges:\n"
+                "  - [__start__, node-1]\n"
+                "  - [node-1, __end__]\n"
+            ),
+        )
         self.model = ModelConfiguration.objects.create(name="gpt-5.5", slug="gpt-55")
         self.credential = Credential.objects.create(
             name="OpenAI",
@@ -745,6 +899,59 @@ class ThreadCreateNameTests(TestCase):
         self.assertRedirects(response, thread.get_absolute_url())
         self.assertRegex(thread.name, r"^[a-z]+-[a-z]+-\d{4}$")
         self.assertEqual(str(thread), thread.name)
+
+    def test_thread_create_form_flow_runtime_clears_agent(self) -> None:
+        form = ThreadCreateForm(
+            data={
+                "runtime": ThreadCreateForm.Runtime.FLOW,
+                "agent": str(self.agent.pk),
+                "flow": str(self.flow.pk),
+                "model": str(self.model.pk),
+                "credential": str(self.credential.pk),
+            },
+            user=self.user,
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIsNone(form.cleaned_data["agent"])
+        self.assertEqual(form.cleaned_data["flow"], self.flow)
+        self.assertIsNone(form.cleaned_data["model"])
+        self.assertIsNone(form.cleaned_data["credential"])
+
+    def test_thread_create_form_agent_runtime_clears_flow(self) -> None:
+        form = ThreadCreateForm(
+            data={
+                "runtime": ThreadCreateForm.Runtime.AGENT,
+                "agent": str(self.agent.pk),
+                "flow": str(self.flow.pk),
+                "model": str(self.model.pk),
+                "credential": str(self.credential.pk),
+            },
+            user=self.user,
+        )
+
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["agent"], self.agent)
+        self.assertIsNone(form.cleaned_data["flow"])
+
+    def test_thread_create_flow_runtime_does_not_require_model_or_credential(self) -> None:
+        with patch("catchy.web.ctf.views.start_thread") as start_thread:
+            response = self.client.post(
+                self._thread_create_url(),
+                {
+                    "runtime": ThreadCreateForm.Runtime.FLOW,
+                    "flow": str(self.flow.pk),
+                    "name": "Flow Run",
+                },
+            )
+
+        thread = Thread.objects.get()
+        self.assertRedirects(response, thread.get_absolute_url())
+        self.assertIsNone(thread.agent)
+        self.assertEqual(thread.flow, self.flow)
+        self.assertIsNone(thread.model)
+        self.assertIsNone(thread.credential)
+        self.assertEqual(start_thread.call_args.args[0].pk, thread.pk)
 
     def _thread_create_url(self) -> str:
         return reverse(

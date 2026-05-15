@@ -70,6 +70,7 @@
       <div class="breakdown-grid">
         {% include "ctf/_breakdown.html" with title="By challenge" rows=stats.by_challenge total=stats.total label_class="mono" %}
         {% include "ctf/_breakdown.html" with title="By agent" rows=stats.by_agent total=stats.total %}
+        {% include "ctf/_breakdown.html" with title="By flow" rows=stats.by_flow total=stats.total %}
         {% include "ctf/_breakdown.html" with title="By model" rows=stats.by_model total=stats.total label_class="mono" %}
       </div>
     </section>

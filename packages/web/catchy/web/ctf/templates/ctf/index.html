@@ -10,12 +10,13 @@
           Hi, <em>{{ user.username|default:"operator" }}</em>.
         </h1>
         <p class="lead reveal mt-3">
-          Your CTFs, agents, and threads — all in one quiet room.
+          Your CTFs, agents, flows, and threads — all in one quiet room.
         </p>
       </div>
       <div class="actions">
         <a class="btn btn-primary" href="{% url 'ctf:ctf_create' %}">New CTF</a>
         <a class="btn btn-ghost" href="{% url 'ctf:agent_list' %}">Agents</a>
+        <a class="btn btn-ghost" href="{% url 'ctf:flow_list' %}">Flows</a>
       </div>
     </section>
 
@@ -45,6 +46,7 @@
         <div class="breakdown-grid">
           {% include "ctf/_breakdown.html" with title="By CTF" rows=thread_stats.by_ctf total=thread_stats.total %}
           {% include "ctf/_breakdown.html" with title="By agent" rows=thread_stats.by_agent total=thread_stats.total %}
+          {% include "ctf/_breakdown.html" with title="By flow" rows=thread_stats.by_flow total=thread_stats.total %}
           {% include "ctf/_breakdown.html" with title="By model" rows=thread_stats.by_model total=thread_stats.total label_class="mono" %}
         </div>
       </section>
@@ -94,6 +96,7 @@
               <span class="idx-desc">
                 {{ thread.ctf.title }}
                 {% if thread.agent %} <span class="muted">·</span> <span class="mono muted">{{ thread.agent.name }}</span>{% endif %}
+                {% if thread.flow %} <span class="muted">·</span> <span class="mono muted">{{ thread.flow.name }}</span>{% endif %}
               </span>
             </div>
             <span class="idx-meta">
@@ -126,6 +129,7 @@
             <div class="breakdown-grid mb-3">
               {% include "ctf/_breakdown.html" with title="By challenge" rows=group.stats.by_challenge total=group.stats.total label_class="mono" %}
               {% include "ctf/_breakdown.html" with title="By agent" rows=group.stats.by_agent total=group.stats.total %}
+              {% include "ctf/_breakdown.html" with title="By flow" rows=group.stats.by_flow total=group.stats.total %}
               {% include "ctf/_breakdown.html" with title="By model" rows=group.stats.by_model total=group.stats.total label_class="mono" %}
             </div>
           {% endif %}
@@ -147,6 +151,9 @@
                       <a class="idx-link" href="{{ thread.get_absolute_url }}">{{ thread }}</a>
                       {% if thread.agent %}
                         <span class="idx-desc"><span class="mono muted">{{ thread.agent.name }}</span></span>
+                      {% endif %}
+                      {% if thread.flow %}
+                        <span class="idx-desc"><span class="mono muted">{{ thread.flow.name }}</span></span>
                       {% endif %}
                     </div>
                     <span class="idx-meta">

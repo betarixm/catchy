@@ -1290,6 +1290,7 @@
             <div class="nav-group">
               <a href="{% url 'ctf:index' %}"{% if url_name == 'index' or url_name == 'ctf_detail' or url_name == 'ctf_create' or url_name == 'ctf_update' or url_name == 'challenge_detail' or url_name == 'challenge_create' or url_name == 'challenge_update' or url_name == 'thread_detail' %} aria-current="page"{% endif %}>CTFs</a>
               <a href="{% url 'ctf:agent_list' %}"{% if url_name == 'agent_list' or url_name == 'agent_create' or url_name == 'agent_detail' or url_name == 'agent_update' %} aria-current="page"{% endif %}>Agents</a>
+              <a href="{% url 'ctf:flow_list' %}"{% if url_name == 'flow_list' or url_name == 'flow_create' or url_name == 'flow_detail' or url_name == 'flow_update' %} aria-current="page"{% endif %}>Flows</a>
             </div>
             <span class="nav-sep" aria-hidden="true"></span>
             <div class="nav-group">
