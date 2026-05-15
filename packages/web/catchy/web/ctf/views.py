@@ -309,6 +309,11 @@ def index(request: HttpRequest) -> HttpResponse:
     visible_threads = _attach_thread_costs(
         _attach_credential_visibility(list(visible_threads_qs), request.user)
     )
+    running_threads = [
+        thread
+        for thread in visible_threads
+        if thread.status == Thread.Status.RUNNING
+    ]
     threads = visible_threads[:20]
     public_thread_groups = _group_threads_by_ctf_and_challenge(
         _attach_thread_costs(
@@ -344,6 +349,7 @@ def index(request: HttpRequest) -> HttpResponse:
         {
             "ctfs": ctfs,
             "threads": threads,
+            "running_threads": running_threads,
             "public_thread_groups": public_thread_groups,
             "public_thread_count": public_thread_count,
             "thread_stats": stats,

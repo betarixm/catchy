@@ -26,6 +26,10 @@
         <div class="stat-value num">{{ ctfs|length }}</div>
       </div>
       <div class="stat">
+        <div class="stat-label">Running threads</div>
+        <div class="stat-value num">{{ running_threads|length }}</div>
+      </div>
+      <div class="stat">
         <div class="stat-label">Recent threads</div>
         <div class="stat-value num">{{ threads|length }}</div>
       </div>
@@ -78,6 +82,35 @@
               <a class="btn btn-sm btn-primary empty-cta" href="{% url 'ctf:ctf_create' %}">Create your first CTF</a>
             </div>
           </li>
+        {% endfor %}
+      </ul>
+    </section>
+
+    <section class="section reveal">
+      <div class="section-head">
+        <h2>Running threads</h2>
+        <span class="meta">{{ running_threads|length }} thread{{ running_threads|length|pluralize }}</span>
+      </div>
+      <ul class="idx-list">
+        {% for thread in running_threads %}
+          <li class="idx-row">
+            <span class="idx-num">{{ forloop.counter|stringformat:"03d" }}</span>
+            <div class="idx-title">
+              <a class="idx-link" href="{{ thread.get_absolute_url }}">{{ thread }}</a>
+              <span class="idx-desc">
+                {{ thread.ctf.title }}
+                {% if thread.agent %} <span class="muted">·</span> <span class="mono muted">{{ thread.agent.name }}</span>{% endif %}
+                {% if thread.flow %} <span class="muted">·</span> <span class="mono muted">{{ thread.flow.name }}</span>{% endif %}
+              </span>
+            </div>
+            <span class="idx-meta">
+              {% if thread.latest_cost_usd != None %}<span class="mono muted num">${{ thread.latest_cost_usd|floatformat:4 }}</span>{% endif %}
+              <span class="pill pill-{{ thread.status|display_status }}">{{ thread.status|display_status }}</span>
+              {% if thread.is_public %}<span class="pill pill-public">public</span>{% endif %}
+            </span>
+          </li>
+        {% empty %}
+          <li><div class="empty">No running threads.</div></li>
         {% endfor %}
       </ul>
     </section>

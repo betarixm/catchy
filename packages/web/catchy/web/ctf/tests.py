@@ -1599,6 +1599,23 @@ class PublicThreadAccessTests(TestCase):
         thread.refresh_from_db()
         self.assertEqual(thread.latest_cost["cost_usd"], "7.100000")
 
+    def test_dashboard_shows_all_running_threads_even_outside_recent_list(self) -> None:
+        running = self._create_thread("running-old", is_public=False)
+        running.status = Thread.Status.RUNNING
+        running.save(update_fields=["status", "updated_at"])
+        for index in range(25):
+            self._create_thread(f"recent-{index}", is_public=False)
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("ctf:index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, str(running))
+        running_threads = response.context["running_threads"]
+        self.assertIn(running.pk, [thread.pk for thread in running_threads])
+        recent_threads = response.context["threads"]
+        self.assertNotIn(running.pk, [thread.pk for thread in recent_threads])
+
     def test_ctf_detail_renders_prompt_markdown_container(self) -> None:
         self.ctf.prompt = "## Rules\n- Be concise"
         self.ctf.save(update_fields=["prompt", "updated_at"])
@@ -2078,18 +2095,29 @@ class PublicThreadAccessTests(TestCase):
         self.assertFalse(thread.events.exists())
         self.assertFalse(thread.steering_messages.exists())
 
-    def test_fork_thread_copies_metadata_and_history(self) -> None:
+    def test_fork_thread_creates_fresh_metadata_and_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source_root = Path(tmp) / "source"
             source_metadata = source_root / "metadata"
+            source_workspace = source_root / "workspace"
             source_metadata.mkdir(parents=True)
+            source_workspace.mkdir(parents=True)
             (source_metadata / "session.jsonl").write_text("history\n")
+            (source_workspace / "notes.txt").write_text("workspace-state\n")
             target_root = Path(tmp) / "target"
 
             thread = self._create_thread("fork-source", is_public=False)
             thread.thread_root = str(source_root)
             thread.metadata_path = str(source_metadata)
-            thread.save(update_fields=["thread_root", "metadata_path", "updated_at"])
+            thread.workspace_path = str(source_workspace)
+            thread.save(
+                update_fields=[
+                    "thread_root",
+                    "metadata_path",
+                    "workspace_path",
+                    "updated_at",
+                ]
+            )
             self._create_stream_event(
                 thread=thread,
                 source="agent_stream",
@@ -2106,7 +2134,9 @@ class PublicThreadAccessTests(TestCase):
                 )
 
             fork = Thread.objects.exclude(pk=thread.pk).get()
-            self.assertTrue((target_root / "metadata" / "session.jsonl").exists())
+            self.assertTrue((target_root / "metadata").is_dir())
+            self.assertFalse((target_root / "metadata" / "session.jsonl").exists())
+            self.assertTrue((target_root / "workspace" / "notes.txt").exists())
 
         self.assertRedirects(response, fork.get_absolute_url())
         self.assertEqual(fork.status, Thread.Status.WAITING)
@@ -2115,7 +2145,6 @@ class PublicThreadAccessTests(TestCase):
         self.assertEqual(
             self._event_tuples(fork),
             [
-                ("agent_stream", "chunk", "hello"),
                 ("system", "thread.forked", f"Forked from thread #{thread.pk}"),
             ],
         )
@@ -2142,16 +2171,13 @@ class PublicThreadAccessTests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(Thread.objects.count(), 1)
 
-    def test_fork_thread_skips_codex_runtime_tmp_metadata(self) -> None:
+    def test_fork_thread_does_not_copy_codex_session_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source_root = Path(tmp) / "source"
             source_metadata = source_root / "metadata"
             source_session = source_metadata / ".codex" / "sessions" / "session.jsonl"
             source_session.parent.mkdir(parents=True)
             source_session.write_text("history\n")
-            inaccessible = source_metadata / ".codex" / "tmp" / "arg0"
-            inaccessible.mkdir(parents=True)
-            inaccessible.chmod(0)
             target_root = Path(tmp) / "target"
 
             thread = self._create_thread("fork-source", is_public=False)
@@ -2160,23 +2186,19 @@ class PublicThreadAccessTests(TestCase):
             thread.save(update_fields=["thread_root", "metadata_path", "updated_at"])
             self.client.force_login(self.user)
 
-            try:
-                with patch("catchy.web.ctf.services._thread_root") as thread_root:
-                    thread_root.return_value = target_root
-                    response = self.client.post(
-                        reverse("ctf:thread_fork", kwargs={"thread_uuid": thread.uuid})
-                    )
-            finally:
-                inaccessible.chmod(0o700)
+            with patch("catchy.web.ctf.services._thread_root") as thread_root:
+                thread_root.return_value = target_root
+                response = self.client.post(
+                    reverse("ctf:thread_fork", kwargs={"thread_uuid": thread.uuid})
+                )
 
             fork = Thread.objects.exclude(pk=thread.pk).get()
             self.assertRedirects(response, fork.get_absolute_url())
-            self.assertTrue(
+            self.assertFalse(
                 (
                     target_root / "metadata" / ".codex" / "sessions" / "session.jsonl"
                 ).exists()
             )
-            self.assertFalse((target_root / "metadata" / ".codex" / "tmp").exists())
 
     def test_thread_stream_starts_after_requested_sequence(self) -> None:
         thread = self._create_thread("stream-after", is_public=True)
