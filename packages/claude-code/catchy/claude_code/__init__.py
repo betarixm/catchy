@@ -792,7 +792,8 @@ class ClaudeCodeEventRenderer(EventRenderer[Message]):
                     case "completed":
                         yield TurnCompleted()
                     case "failed":
-                        raise RuntimeError(task_notification_message.summary)
+                        # raise RuntimeError(task_notification_message.summary)
+                        yield Delta(tag="agent", text=task_notification_message.summary)
                     case "stopped":
                         yield TurnCompleted()
             case MirrorErrorMessage() as mirror_error_message:
