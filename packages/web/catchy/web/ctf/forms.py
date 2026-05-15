@@ -594,7 +594,7 @@ class ChallengeForm(forms.ModelForm):
         help_texts = {
             "description": "Markdown is supported.",
             "source_archive": (
-                "Upload a challenge source archive. Supported formats: "
+                "Optional challenge source archive. Supported formats: "
                 f"{SOURCE_ARCHIVE_FORMAT_HINT}."
             ),
         }
@@ -636,7 +636,7 @@ class ChallengeForm(forms.ModelForm):
                 )
             else:
                 self.fields["source_archive"].help_text = (
-                    "Upload an archive, or leave blank when using a download URL. "
+                    "Upload an archive, provide a download URL, or leave blank. "
                     f"Supported formats: {SOURCE_ARCHIVE_FORMAT_HINT}."
                 )
         else:
@@ -678,18 +678,11 @@ class ChallengeForm(forms.ModelForm):
         cleaned = super().clean()
         source_url = str(cleaned.get("source_url") or "").strip()
         has_new_upload = bool(self.files.get("source_archive"))
-        has_existing_archive = bool(self.instance.pk and self.instance.source_archive)
         if has_new_upload and source_url:
             self.add_error(
                 "source_url",
                 "Upload a file or enter a download URL, not both.",
             )
-        elif not has_new_upload and not source_url and not has_existing_archive:
-            self.add_error(
-                "source_archive",
-                "Upload a source archive or enter a download URL.",
-            )
-
         url = (cleaned.get("webhook_url") or "").strip()
         lang = (cleaned.get("webhook_preferred_language") or "").strip()
         clear = bool(cleaned.get("clear_webhook"))

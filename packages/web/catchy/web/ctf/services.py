@@ -32,8 +32,6 @@ from catchy.core.webhook.models import Webhook
 from django.conf import settings
 from django.core.exceptions import PermissionDenied
 from django.utils import timezone
-from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
 
 from .models import (
     AgentConfiguration,
@@ -57,24 +55,17 @@ _workspace_refresh_timers: dict[int, threading.Timer] = {}
 _workspace_refresh_paths: dict[int, list[str]] = {}
 
 
-class _WorkspaceEventHandler(FileSystemEventHandler):
-    def __init__(self, thread_id: int):
-        self.thread_id = thread_id
-
-    def on_any_event(self, event: Any) -> None:
-        if getattr(event, "is_directory", False):
-            return
-        path = getattr(event, "src_path", None) or getattr(event, "dest_path", None)
-        if not path:
-            return
-        _queue_workspace_changed_event(self.thread_id, str(path))
-
-
 def _start_workspace_observer(thread_id: int, workspace: Path) -> Any:
-    observer = Observer()
-    observer.schedule(_WorkspaceEventHandler(thread_id), str(workspace), recursive=True)
-    observer.start()
-    return observer
+    # Hotfix: disable file-system watching to avoid exhausting host inotify limits.
+    # Workspace updates are still available via stream events emitted by other paths.
+    return None
+
+
+def _stop_workspace_observer(observer: Any) -> None:
+    if observer is None:
+        return
+    observer.stop()
+    observer.join()
 
 
 def _queue_workspace_changed_event(thread_id: int, changed_path: str) -> None:
@@ -224,7 +215,11 @@ def run_thread_sync(thread_id: int) -> None:
     source_directory.mkdir(parents=True, exist_ok=True)
     workspace.mkdir(parents=True, exist_ok=True)
     metadata.mkdir(parents=True, exist_ok=True)
-    safe_extract_archive(Path(thread.challenge.source_archive.path), source_directory)
+    if thread.challenge.source_archive:
+        safe_extract_archive(
+            Path(thread.challenge.source_archive.path),
+            source_directory,
+        )
 
     thread.thread_root = str(thread_root)
     thread.workspace_path = str(workspace)
@@ -310,8 +305,7 @@ def run_thread_sync(thread_id: int) -> None:
                 )
             )
     except Exception as exc:
-        observer.stop()
-        observer.join()
+        _stop_workspace_observer(observer)
         Thread.objects.filter(pk=thread.pk).update(
             status=Thread.Status.FAILED,
             error=str(exc),
@@ -324,8 +318,7 @@ def run_thread_sync(thread_id: int) -> None:
         status=terminal_status,
         updated_at=timezone.now(),
     )
-    observer.stop()
-    observer.join()
+    _stop_workspace_observer(observer)
     thread.status = terminal_status
     _record_event(
         thread,

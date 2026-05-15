@@ -404,7 +404,10 @@ class Challenge(TimeStampedModel):
     description = models.TextField(blank=True)
     webhook = models.TextField(blank=True, default="")
     config = models.TextField(blank=True, default="")
-    source_archive = models.FileField(upload_to=challenge_source_upload_path)
+    source_archive = models.FileField(
+        upload_to=challenge_source_upload_path,
+        blank=True,
+    )
     created_by = models.ForeignKey(
         django_settings.AUTH_USER_MODEL,
         null=True,

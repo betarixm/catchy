@@ -773,7 +773,7 @@ class ChallengeSourceFormTests(TestCase):
             )
             self.assertTrue((Path(tmp) / challenge.source_archive.name).exists())
 
-    def test_challenge_form_rejects_missing_source(self) -> None:
+    def test_challenge_form_allows_missing_source(self) -> None:
         form = ChallengeForm(
             data={
                 "challenge_id": "missing-source",
@@ -786,8 +786,9 @@ class ChallengeSourceFormTests(TestCase):
             ctf=self.ctf,
         )
 
-        self.assertFalse(form.is_valid())
-        self.assertIn("source_archive", form.errors)
+        self.assertTrue(form.is_valid(), form.errors)
+        challenge = form.save()
+        self.assertFalse(bool(challenge.source_archive))
 
 
 class ChallengeSourceArchiveTests(TestCase):
