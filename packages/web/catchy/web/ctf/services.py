@@ -253,12 +253,28 @@ def run_thread_sync(thread_id: int) -> None:
         webhook_data = thread.challenge.webhook_mapping()
         webhook = Webhook(**webhook_data) if webhook_data else None
         if thread.flow_id is not None:
-            flow = load_flow(
+            flow_data = build_flow_configuration(
                 thread.flow,
                 model_configuration=thread.model,
                 credential=thread.credential,
                 user=thread.created_by,
             )
+            flow = CoreFlow.from_configuration(
+                CoreFlowConfiguration.model_validate(flow_data)
+            )
+            node_model_names: dict[str, str] = {}
+            for agent_data in flow_data.get("agents", []):
+                if not isinstance(agent_data, dict):
+                    continue
+                node_id = str(agent_data.get("id") or "").strip()
+                model = agent_data.get("model")
+                model_name = (
+                    str(model.get("name")).strip()
+                    if isinstance(model, dict) and isinstance(model.get("name"), str)
+                    else ""
+                )
+                if node_id and model_name:
+                    node_model_names[node_id] = model_name
             terminal_status = asyncio.run(
                 _run_flow_stream(
                     thread_id=thread.pk,
@@ -268,6 +284,7 @@ def run_thread_sync(thread_id: int) -> None:
                     metadata=metadata,
                     webhook=webhook,
                     model_name=_thread_model_name(thread),
+                    node_model_names=node_model_names,
                     ctf_prompt=thread.ctf.prompt,
                 )
             )
@@ -796,6 +813,7 @@ async def _run_flow_stream(
     metadata: Path,
     webhook: Webhook | None,
     model_name: str,
+    node_model_names: dict[str, str] | None = None,
     ctf_prompt: str = "",
 ) -> Thread.Status:
     messages: list[str] = []
@@ -816,18 +834,23 @@ async def _run_flow_stream(
 
     renderers: dict[str, EventRenderer[Any]] = {}
 
-    async def event_observer(event: Event[Any]) -> None:
+    async def event_observer(event: Event[Any], node_id: str | None = None) -> None:
         if await sync_to_async(_consume_stop_command, thread_sensitive=True)(thread_id):
             raise _FlowStopRequested
+        event_model_name = (
+            node_model_names.get(node_id, model_name)
+            if isinstance(node_id, str) and node_model_names
+            else model_name
+        )
         renderer = _renderer_for_event(
             event,
-            model_name=model_name,
+            model_name=event_model_name,
             renderers=renderers,
         )
         await sync_to_async(_record_stream_event, thread_sensitive=True)(
             thread_id,
             event,
-            model_name,
+            event_model_name,
             renderer,
         )
 

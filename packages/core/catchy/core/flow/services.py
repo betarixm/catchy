@@ -45,7 +45,7 @@ class AgentNode[T]:
                     is_started = True
                 else:
                     event = await stream.asend(Nop())  # TODO: Support other interrupts
-                observer_result = state["event_observer"](event)
+                observer_result = state["event_observer"](event, self.id)
                 if inspect.isawaitable(observer_result):
                     await observer_result
                 events.append(event)

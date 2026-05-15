@@ -14,5 +14,5 @@ class State(TypedDict):
     metadata_directory: Path
     metadata_directory_factory: NotRequired[Callable[[str], Path]]
     webhook: Webhook | None
-    event_observer: Callable[[Event[Any]], None | Awaitable[None]]
+    event_observer: Callable[[Event[Any], str | None], None | Awaitable[None]]
     messages: Annotated[list[str], operator.add]
