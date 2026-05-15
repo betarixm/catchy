@@ -3,6 +3,8 @@ FROM ghcr.io/betarixm/catchy-ubuntu:24.04
 RUN apt-get update \
     && apt-get install -y --no-install-recommends sudo \
     && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /workspace /metadata \
+    && chmod 1777 /workspace /metadata
 
 # Claude Code
 WORKDIR /tmp

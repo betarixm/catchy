@@ -132,12 +132,25 @@ RUN chrome_url="$(curl -fsSL https://googlechromelabs.github.io/chrome-for-testi
     && curl -fsSL "$chrome_url" -o /tmp/chrome-linux64.zip \
     && unzip -q /tmp/chrome-linux64.zip -d /opt/chrome-for-testing \
     && rm /tmp/chrome-linux64.zip \
-    && chmod -R a+rX /opt/chrome-for-testing
+    && chmod -R a+rX /opt/chrome-for-testing \
+    && mv /opt/chrome-for-testing/chrome-linux64/chrome /opt/chrome-for-testing/chrome-linux64/chrome.real \
+    && printf '%s\n' \
+    '#!/bin/sh' \
+    'set -eu' \
+    'exec /opt/chrome-for-testing/chrome-linux64/chrome.real \' \
+    '  --disable-crash-reporter \' \
+    '  --disable-crashpad \' \
+    '  --noerrdialogs \' \
+    '  --no-sandbox \' \
+    '  --disable-dev-shm-usage \' \
+    '  "$@"' \
+    > /opt/chrome-for-testing/chrome-linux64/chrome \
+    && chmod +x /opt/chrome-for-testing/chrome-linux64/chrome
 
 RUN printf '%s\n' \
     '#!/bin/sh' \
     'set -eu' \
-    'exec /opt/chrome-for-testing/chrome-linux64/chrome --no-sandbox --disable-dev-shm-usage "$@"' \
+    'exec /opt/chrome-for-testing/chrome-linux64/chrome "$@"' \
     > /usr/local/bin/chrome \
     && chmod +x /usr/local/bin/chrome \
     && ln -sf /usr/local/bin/chrome /usr/local/bin/google-chrome \

@@ -3,11 +3,13 @@ from __future__ import annotations
 import io
 import json
 import logging
+import shlex
 import tarfile
 import tomllib
+from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated, Any, AsyncGenerator, Iterator, Literal
+from typing import Annotated, Any, AsyncGenerator, Iterator, Literal, cast
 
 import tomli_w
 from catchy.core.agent.models import (
@@ -77,6 +79,7 @@ from pydantic import (
 from pydantic_core import core_schema
 
 _LOGGER = logging.getLogger(__name__)
+_DEFAULT_CONTAINER_METADATA_DIRECTORY = "/metadata"
 
 type NotificationValue = Annotated[
     Notification,
@@ -468,6 +471,7 @@ class CodexAgent(Agent[Notification]):
 
         try:
             _LOGGER.info(f"({self._id}) Started Docker container: {container.id}")
+            self._prepare_runtime_directories(container)
             self._configure_codex_home(container, container_codex_home)
             container.reload()
             yield container
@@ -478,6 +482,45 @@ class CodexAgent(Agent[Notification]):
             container.remove(force=True)
             _LOGGER.info(f"({self._id}) Docker container removed: {container.id}")
 
+    def _prepare_runtime_directories(self, container: Container) -> None:
+        script = f"""
+set -eu
+mkdir -p {shlex.quote(self._container_workspace_directory)} {shlex.quote(self._container_metadata_directory)}
+chmod 1777 {shlex.quote(self._container_workspace_directory)} {shlex.quote(self._container_metadata_directory)}
+"""
+        result = container.exec_run(["sh", "-c", script])
+        if result.exit_code != 0:
+            output = self._docker_output_to_bytes(result.output)
+            raise RuntimeError(
+                "Failed to prepare writable runtime directories in Codex container: "
+                f"{output.decode()}"
+            )
+
+    @staticmethod
+    def _docker_output_to_bytes(output: object) -> bytes:
+        if isinstance(output, bytes):
+            return output
+        if isinstance(output, bytearray):
+            return bytes(output)
+        if isinstance(output, str):
+            return output.encode()
+        if isinstance(output, tuple):
+            parts = cast(tuple[object, ...], output)
+            return b"".join(CodexAgent._docker_output_to_bytes(part) for part in parts)
+        if not isinstance(output, Iterable):
+            return b""
+        chunks: list[bytes] = []
+        for part in cast(Iterable[object], output):
+            if isinstance(part, bytes):
+                chunks.append(part)
+            elif isinstance(part, bytearray):
+                chunks.append(bytes(part))
+            elif isinstance(part, str):
+                chunks.append(part.encode())
+            else:
+                chunks.append(str(part).encode())
+        return b"".join(chunks)
+
     def _seed_metadata_directory_from_image(self, metadata_directory: Path) -> None:
         host_codex_home = metadata_directory / ".codex"
         host_config_toml = host_codex_home / "config.toml"
@@ -485,44 +528,54 @@ class CodexAgent(Agent[Notification]):
             return
 
         host_codex_home.mkdir(parents=True, exist_ok=True)
-        container_config_toml = (
-            f"{self._container_metadata_directory}/.codex/config.toml"
-        )
-        probe_container = self._docker_client.containers.create(
-            self._docker_image,
-            command=["cat", container_config_toml],
-        )
-
-        try:
-            probe_container.start()
-            result = probe_container.wait()
-            exit_code = result.get("StatusCode", 1)
-            output = probe_container.logs()
-            if exit_code != 0:
-                raise RuntimeError(
-                    "Failed to seed metadata .codex/config.toml from Docker image at "
-                    f"{container_config_toml}: {output.decode()}"
-                )
-
-            host_config_toml.write_bytes(output)
-            _LOGGER.info(
-                "(%s) Seeded metadata .codex/config.toml from Docker image path %s",
-                self._id,
-                container_config_toml,
+        candidate_paths = [
+            f"{self._container_metadata_directory}/.codex/config.toml",
+            f"{_DEFAULT_CONTAINER_METADATA_DIRECTORY}/.codex/config.toml",
+        ]
+        unique_candidate_paths = list(dict.fromkeys(candidate_paths))
+        errors: list[str] = []
+        for container_config_toml in unique_candidate_paths:
+            probe_container = self._docker_client.containers.create(
+                self._docker_image,
+                command=["cat", container_config_toml],
             )
-        finally:
-            probe_container.remove(force=True)
+            try:
+                probe_container.start()
+                result = probe_container.wait()
+                exit_code = result.get("StatusCode", 1)
+                output = probe_container.logs()
+                if exit_code != 0:
+                    errors.append(
+                        f"{container_config_toml}: {output.decode().strip() or 'not found'}"
+                    )
+                    continue
+
+                host_config_toml.write_bytes(output)
+                _LOGGER.info(
+                    "(%s) Seeded metadata .codex/config.toml from Docker image path %s",
+                    self._id,
+                    container_config_toml,
+                )
+                return
+            finally:
+                probe_container.remove(force=True)
+
+        raise RuntimeError(
+            "Failed to seed metadata .codex/config.toml from Docker image. "
+            f"Tried: {', '.join(unique_candidate_paths)}. Errors: {'; '.join(errors)}"
+        )
 
     def _configure_codex_home(
         self, container: Container, container_codex_home: str
     ) -> None:
         result = container.exec_run(["cat", f"{container_codex_home}/config.toml"])
+        output = self._docker_output_to_bytes(result.output)
         if result.exit_code != 0:
             raise RuntimeError(
-                f"Codex home config.toml not found in container; initializing Codex home at {container_codex_home}: {result.output.decode()}"
+                f"Codex home config.toml not found in container; initializing Codex home at {container_codex_home}: {output.decode()}"
             )
 
-        config_toml = tomllib.loads(result.output.decode())
+        config_toml = tomllib.loads(output.decode())
 
         self._put_container_files(
             container,
@@ -549,7 +602,7 @@ class CodexAgent(Agent[Notification]):
         result = container.exec_run(["mkdir", "-p", directory])
         if result.exit_code != 0:
             raise RuntimeError(
-                f"failed to create directory {directory} in container: {result.output.decode()}"
+                f"failed to create directory {directory} in container: {self._docker_output_to_bytes(result.output).decode()}"
             )
         archive_buffer = io.BytesIO()
         with tarfile.open(fileobj=archive_buffer, mode="w") as archive:

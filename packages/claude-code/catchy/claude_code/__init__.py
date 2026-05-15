@@ -107,6 +107,7 @@ _SERIALIZABLE_TYPES = {
 }
 
 _LOGGER = logging.getLogger(__name__)
+_DEFAULT_CONTAINER_METADATA_DIRECTORY = "/metadata"
 
 
 def message_json_default(value: Any) -> JsonValue:
@@ -511,12 +512,14 @@ class ClaudeCodeAgent(Agent[Message]):
     ) -> None:
         home = shlex.quote(self._container_workspace_directory)
         config_dir = shlex.quote(container_claude_configuration_directory)
+        metadata_dir = shlex.quote(self._container_metadata_directory)
         script = """
 set -eu
 uid=__CATCHY_UID__
 gid=__CATCHY_GID__
 home=__CATCHY_HOME__
 config_dir=__CATCHY_CONFIG_DIR__
+metadata_dir=__CATCHY_METADATA_DIR__
 
 test ! -d /root || chmod 755 /root
 
@@ -541,14 +544,16 @@ mkdir -p /etc/sudoers.d
 printf '%s ALL=(ALL) NOPASSWD:ALL\\n' "$user_name" > /etc/sudoers.d/catchy-claude-code
 chmod 0440 /etc/sudoers.d/catchy-claude-code
 
-mkdir -p "$config_dir"
-chown -R "$uid:$gid" "$config_dir"
+mkdir -p "$home" "$config_dir" "$metadata_dir"
+chown -R "$uid:$gid" "$home" "$config_dir" "$metadata_dir"
+chmod 1777 "$home" "$metadata_dir"
 """
         script = (
             script.replace("__CATCHY_UID__", str(os.getuid() or 1000))
             .replace("__CATCHY_GID__", str(os.getgid() or 1000))
             .replace("__CATCHY_HOME__", home)
             .replace("__CATCHY_CONFIG_DIR__", config_dir)
+            .replace("__CATCHY_METADATA_DIR__", metadata_dir)
         )
         result = container.exec_run(["sh", "-c", script])
         if result.exit_code != 0:
@@ -591,16 +596,28 @@ chown -R "$uid:$gid" "$config_dir"
         )
 
     def _image_claude_settings(self) -> dict[str, Any]:
-        try:
-            raw_settings = cast(
-                object, self._docker_client.containers.run(self._docker_image)
-            )
-        except DockerException:
-            return {}
-        if isinstance(raw_settings, bytes):
-            return self._json_object_from_bytes(raw_settings)
-        if isinstance(raw_settings, str):
-            return self._json_object_from_bytes(raw_settings.encode())
+        candidate_paths = [
+            f"{self._container_metadata_directory}/.claude/settings.json",
+            f"{_DEFAULT_CONTAINER_METADATA_DIRECTORY}/.claude/settings.json",
+        ]
+        for settings_path in dict.fromkeys(candidate_paths):
+            probe_container: Container | None = None
+            try:
+                probe_container = self._docker_client.containers.create(
+                    self._docker_image,
+                    command=["cat", settings_path],
+                )
+                probe_container.start()
+                result = probe_container.wait()
+                if result.get("StatusCode", 1) != 0:
+                    continue
+                raw_settings = probe_container.logs()
+                return self._json_object_from_bytes(raw_settings)
+            except DockerException:
+                continue
+            finally:
+                if probe_container is not None:
+                    probe_container.remove(force=True)
         return {}
 
     def _json_object_from_bytes(self, value: bytes) -> dict[str, Any]:
@@ -608,7 +625,7 @@ chown -R "$uid:$gid" "$config_dir"
             return {}
         try:
             parsed = cast(object, json.loads(value.decode()))
-        except UnicodeDecodeError, json.JSONDecodeError:
+        except (UnicodeDecodeError, json.JSONDecodeError):
             return {}
         if not isinstance(parsed, dict):
             return {}
