@@ -98,7 +98,7 @@ jobs:
           cache-from: type=gha,scope=catchy-ubuntu
           cache-to: type=gha,mode=max,scope=catchy-ubuntu
           tags: |
-            ${{ env.UBUNTU_IMAGE_NAME }}:26.04
+            ${{ env.UBUNTU_IMAGE_NAME }}:24.04
             ${{ env.UBUNTU_IMAGE_NAME }}:${{ github.sha }}
 
   publish-codex:

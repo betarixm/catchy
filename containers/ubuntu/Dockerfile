@@ -1,6 +1,7 @@
-FROM ubuntu:26.04
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # System packages
 RUN apt-get update \
@@ -119,6 +120,11 @@ RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
     playwright \
     ipython
 
+# Preinstall Playwright-managed Chromium for `playwright.chromium.launch()`
+RUN mkdir -p "$PLAYWRIGHT_BROWSERS_PATH" \
+    && chmod 755 "$PLAYWRIGHT_BROWSERS_PATH" \
+    && python -m playwright install chromium
+
 # Browser automation / Chrome DevTools Protocol
 RUN chrome_url="$(curl -fsSL https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json \
     | jq -r '.channels.Stable.downloads.chrome[] | select(.platform == "linux64") | .url')" \
@@ -134,6 +140,8 @@ RUN printf '%s\n' \
     'exec /opt/chrome-for-testing/chrome-linux64/chrome --no-sandbox --disable-dev-shm-usage "$@"' \
     > /usr/local/bin/chrome \
     && chmod +x /usr/local/bin/chrome \
+    && ln -sf /usr/local/bin/chrome /usr/local/bin/google-chrome \
+    && ln -sf /usr/local/bin/chrome /usr/local/bin/google-chrome-stable \
     && printf '%s\n' \
     '#!/bin/sh' \
     'set -eu' \

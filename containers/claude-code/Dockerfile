@@ -1,4 +1,4 @@
-FROM ghcr.io/betarixm/catchy-ubuntu:26.04
+FROM ghcr.io/betarixm/catchy-ubuntu:24.04
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends sudo \

@@ -1,4 +1,4 @@
-FROM ghcr.io/betarixm/catchy-ubuntu:26.04
+FROM ghcr.io/betarixm/catchy-ubuntu:24.04
 
 # Codex
 RUN npm i -g @openai/codex
